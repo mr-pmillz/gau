@@ -33,19 +33,43 @@ $ gau -h
 | `--from`      | fetch urls from date (format: YYYYMM)                                                       | gau --from 202101                         |
 | `--ft`        | list of mime-types to filter                                                                | gau --ft text/plain                       |
 | `--fp`        | remove different parameters of the same endpoint                                            | gau --fp                                  |
+| `--fp-cap`    | max --fp dedup entries (0 = unbounded; LRU eviction past the cap)                           | gau --fp --fp-cap 100000                  |
 | `--json`      | output as json                                                                              | gau --json                                |
 | `--mc`        | list of status codes to match                                                               | gau --mc 200,500                          |
 | `--mt`        | list of mime-types to match                                                                 | gau --mt text/html,application/json       |
 | `--o`         | filename to write results to                                                                | gau --o out.txt                           |
 | `--providers` | list of providers to use (wayback,commoncrawl,otx,urlscan)                                  | gau --providers wayback                   |
 | `--proxy`     | http proxy to use (socks5:// or http://                                                     | gau --proxy http://proxy.example.com:8080 |
+| `--rate-limit-wayback`     | wayback requests per second (0 = unlimited)                                    | gau --rate-limit-wayback 0.5              |
+| `--rate-limit-commoncrawl` | commoncrawl requests per second (0 = unlimited)                                | gau --rate-limit-commoncrawl 0.25         |
+| `--rate-limit-otx`         | otx requests per second (0 = unlimited)                                        | gau --rate-limit-otx 1                    |
+| `--rate-limit-urlscan`     | urlscan requests per second (0 = unlimited)                                    | gau --rate-limit-urlscan 1                |
 | `--retries`   | retries for HTTP client                                                                     | gau --retries 10                          |
+| `--secure`    | verify TLS certificates (default false: insecure, for back-compat)                          | gau --secure example.com                  |
 | `--timeout`   | timeout (in seconds) for HTTP client                                                        | gau --timeout 60                          |
 | `--subs`      | include subdomains of target domain                                                         | gau example.com --subs                    |
 | `--threads`   | number of workers to spawn                                                                  | gau example.com --threads                 |
 | `--to`        | fetch urls to date (format: YYYYMM)                                                         | gau example.com --to 202101               |
 | `--verbose`   | show verbose output                                                                         | gau --verbose example.com                 |
 | `--version`   | show gau version                                                                            | gau --version                             |
+
+### Rate limiting
+
+This fork ships with conservative per-provider rate limits enabled by
+default. Common Crawl in particular has been hammered by the unmaintained
+upstream `gau`, leading them to introduce strict server-side throttling. The
+defaults (`commoncrawl=0.5/s`, `wayback=1/s`, `otx=5/s`, `urlscan=2/s`) are
+designed to be polite to those services while still being usable. Set any
+limit to `0` to disable for that provider.
+
+### TLS verification
+
+By default `gau` does **not** verify TLS certificates — this preserves the
+historical behavior of the upstream tool. Pass `--secure` (or set
+`secure = true` in `.gau.toml`) to enable verification. Verification is the
+right choice for a public-internet recon tool; insecure remains the default
+only to avoid silently breaking existing users on networks that terminate
+TLS in unexpected ways.
 
 
 ## Configuration Files

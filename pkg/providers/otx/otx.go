@@ -1,32 +1,57 @@
+// Package otx fetches URLs from AlienVault's Open Threat Exchange.
 package otx
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/bobesa/go-domain-util/domainutil"
 	jsoniter "github.com/json-iterator/go"
 	"github.com/mr-pmillz/gau/v2/pkg/httpclient"
 	"github.com/mr-pmillz/gau/v2/pkg/providers"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/time/rate"
 )
 
 const (
-	Name = "otx"
+	Name           = "otx"
+	defaultBaseURL = "https://otx.alienvault.com/"
 )
-
-type Client struct {
-	config *providers.Config
-}
 
 var _ providers.Provider = (*Client)(nil)
 
-func New(c *providers.Config) *Client {
-	if c.OTX != "" {
-		setBaseURL(c.OTX)
-	}
-	return &Client{config: c}
+// Client implements providers.Provider against OTX.
+type Client struct {
+	config  *providers.Config
+	limiter *rate.Limiter
+	baseURL string
 }
+
+func New(c *providers.Config) *Client {
+	base := defaultBaseURL
+	if c.OTX != "" {
+		base = ensureTrailingSlash(c.OTX)
+	}
+	return &Client{
+		config:  c,
+		limiter: providers.Limiter(c.RateLimits.OTX),
+		baseURL: base,
+	}
+}
+
+func ensureTrailingSlash(s string) string {
+	if strings.HasSuffix(s, "/") {
+		return s
+	}
+	return s + "/"
+}
+
+// SetBaseURL overrides the OTX endpoint. Used by tests.
+func (c *Client) SetBaseURL(u string) { c.baseURL = ensureTrailingSlash(u) }
+
+func (c *Client) Name() string { return Name }
 
 type otxResult struct {
 	HasNext    bool `json:"has_next"`
@@ -42,38 +67,48 @@ type otxResult struct {
 	} `json:"url_list"`
 }
 
-func (c *Client) Name() string {
-	return Name
-}
-
 func (c *Client) Fetch(ctx context.Context, domain string, results chan string) error {
 	for page := uint(1); ; page++ {
-		select {
-		case <-ctx.Done():
+		if err := ctx.Err(); err != nil {
 			return nil
-		default:
-			logrus.WithFields(logrus.Fields{"provider": Name, "page": page - 1}).Infof("fetching %s", domain)
-			apiURL := c.formatURL(domain, page)
-			resp, err := httpclient.MakeRequest(c.config.Client, apiURL, c.config.MaxRetries, c.config.Timeout)
-			if err != nil {
-				return fmt.Errorf("failed to fetch alienvault(%d): %s", page, err)
-			}
-			var result otxResult
-			if err := jsoniter.Unmarshal(resp, &result); err != nil {
-				return fmt.Errorf("failed to decode otx results for page %d: %s", page, err)
-			}
+		}
 
-			for _, entry := range result.URLList {
-				results <- entry.URL
-			}
-
-			if !result.HasNext {
+		logrus.WithFields(logrus.Fields{"provider": Name, "page": page - 1}).Infof("fetching %s", domain)
+		apiURL := c.formatURL(domain, page)
+		resp, err := httpclient.MakeRequest(ctx, c.config.Client, apiURL,
+			httpclient.RequestOpts{
+				MaxRetries: c.config.MaxRetries,
+				Timeout:    c.config.Timeout,
+				Limiter:    c.limiter,
+			})
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return nil
 			}
+			return fmt.Errorf("fetch otx page %d: %w", page, err)
+		}
+
+		var result otxResult
+		if err := jsoniter.Unmarshal(resp, &result); err != nil {
+			return fmt.Errorf("decode otx page %d: %w", page, err)
+		}
+
+		for _, entry := range result.URLList {
+			select {
+			case <-ctx.Done():
+				return nil
+			case results <- entry.URL:
+			}
+		}
+
+		if !result.HasNext {
+			return nil
 		}
 	}
 }
 
+// formatURL picks `domain` vs `hostname` based on whether the input has a
+// subdomain and whether --subs is enabled.
 func (c *Client) formatURL(domain string, page uint) string {
 	category := "hostname"
 	if !domainutil.HasSubdomain(domain) {
@@ -83,12 +118,5 @@ func (c *Client) formatURL(domain string, page uint) string {
 		domain = domainutil.Domain(domain)
 		category = "domain"
 	}
-
-	return fmt.Sprintf("%sapi/v1/indicators/%s/%s/url_list?limit=100&page=%d", _BaseURL, category, domain, page)
-}
-
-var _BaseURL = "https://otx.alienvault.com/"
-
-func setBaseURL(baseURL string) {
-	_BaseURL = baseURL
+	return fmt.Sprintf("%sapi/v1/indicators/%s/%s/url_list?limit=100&page=%d", c.baseURL, category, domain, page)
 }

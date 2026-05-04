@@ -1,17 +1,15 @@
-# Build image: golang:1.21.0-alpine3.17
-FROM golang:1.21.0-alpine3.17 as build
+# Build image
+FROM golang:1.23-alpine AS build
 
 WORKDIR /app
 
 COPY . .
-RUN go mod download && go build -o ./build/gau ./cmd/gau
+RUN go mod download && CGO_ENABLED=0 go build -o ./build/gau ./cmd/gau
 
-ENTRYPOINT ["/app/gau/build/gau"]
+# Release image
+FROM alpine:3.19
 
-# Release image: alpine:3.17
-FROM alpine:3.17
-
-RUN apk -U upgrade --no-cache
+RUN apk -U upgrade --no-cache && apk add --no-cache ca-certificates
 COPY --from=build /app/build/gau /usr/local/bin/gau
 
 RUN adduser \

@@ -24,38 +24,41 @@ func main() {
 		log.Fatal(err)
 	}
 
-	gau := new(runner.Runner)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	if err = gau.Init(config, cfg.Providers, cfg.Filters); err != nil {
+	gau := new(runner.Runner)
+	if err = gau.Init(ctx, config, cfg.Providers, cfg.Filters); err != nil {
 		log.Warn(err)
 	}
 
 	results := make(chan string)
 
 	out := os.Stdout
-	// Handle results in background
 	if config.Output != "" {
 		out, err = os.OpenFile(config.Output, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 		if err != nil {
 			log.Fatalf("Could not open output file: %v\n", err)
 		}
-		defer out.Close()
+		defer func() { _ = out.Close() }()
 	}
 
 	var writeWg sync.WaitGroup
 	writeWg.Add(1)
-	go func(out io.Writer, JSON bool) {
+	go func(out io.Writer, useJSON bool) {
 		defer writeWg.Done()
-		if JSON {
-			output.WriteURLsJSON(out, results, config.Blacklist, config.RemoveParameters)
-		} else if err = output.WriteURLs(out, results, config.Blacklist, config.RemoveParameters); err != nil {
-			log.Fatalf("error writing results: %v\n", err)
+		if useJSON {
+			output.WriteURLsJSON(out, results, config.Blacklist, config.RemoveParameters, config.FPCap)
+			return
+		}
+		if werr := output.WriteURLs(out, results, config.Blacklist, config.RemoveParameters, config.FPCap); werr != nil {
+			log.Fatalf("error writing results: %v\n", werr)
 		}
 	}(out, config.JSON)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+
 	workChan := make(chan runner.Work)
 	gau.Start(ctx, workChan, results)
+
 	domains := flags.Args()
 	if len(domains) > 0 {
 		for _, provider := range gau.Providers {
@@ -77,12 +80,7 @@ func main() {
 	}
 	close(workChan)
 
-	// wait for providers to fetch URLS
 	gau.Wait()
-
-	// close results channel
 	close(results)
-
-	// wait for writer to finish output
 	writeWg.Wait()
 }

@@ -4,8 +4,6 @@ import (
 	"strings"
 )
 
-var _BaseURL = "https://urlscan.io/"
-
 type apiResponse struct {
 	Status  int            `json:"status"`
 	Results []searchResult `json:"results"`
@@ -27,9 +25,8 @@ type archivedPage struct {
 func parseSort(sort []interface{}) string {
 	var sortParam []string
 	for _, t := range sort {
-		switch t.(type) {
-		case string:
-			sortParam = append(sortParam, t.(string))
+		if s, ok := t.(string); ok {
+			sortParam = append(sortParam, s)
 		}
 	}
 	return strings.Join(sortParam, ",")

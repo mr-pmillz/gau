@@ -1,14 +1,33 @@
 threads = 2
 verbose = false
-retries = 15
+retries = 5
 subdomains = false
 parameters = false
 providers = ["wayback","commoncrawl","otx","urlscan"]
 blacklist = ["ttf","woff","svg","png","jpg"]
 json = false
 
+# secure = true enables TLS verification. Default (false) preserves the
+# historical insecure-by-default behavior so existing users aren't broken;
+# set to true if your network path doesn't terminate TLS for you.
+secure = false
+
+# fpcap caps the size of the --fp dedup set (entries). 0 means unbounded.
+# When the cap is exceeded, oldest entries are evicted (LRU); a URL whose
+# first-occurrence host+path was evicted may emit a duplicate.
+fpcap = 1000000
+
 [urlscan]
   apikey = ""
+
+# Per-provider rate limits (requests per second). 0 disables rate limiting.
+# Conservative defaults — CommonCrawl in particular has been hammered by
+# this tool historically; please keep its rate low.
+[ratelimit]
+  wayback = 1.0
+  commoncrawl = 0.5
+  otx = 5.0
+  urlscan = 2.0
 
 [filters]
   from = ""
