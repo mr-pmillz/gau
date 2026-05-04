@@ -5,6 +5,16 @@ subdomains = false
 parameters = false
 providers = ["wayback","commoncrawl","otx","urlscan"]
 blacklist = ["ttf","woff","svg","png","jpg"]
+
+# matchextensions: when non-empty, restricts emitted URLs to those whose path
+# ends in (a `.` + one of) these. Compound extensions like "tar.gz" are
+# supported. Compatible with blacklist — both filters are applied.
+# matchextensions = ["sql","bak","zip","tar.gz"]
+
+# matchregex: when non-empty, restricts emitted URLs to those matching at
+# least one of these Go regex patterns. Use (?i) prefix for case-insensitive.
+# Match is against the full URL string.
+# matchregex = ["/admin", "\\.php$"]
 json = false
 
 # secure = true enables TLS verification. Default (false) preserves the

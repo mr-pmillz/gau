@@ -35,6 +35,8 @@ $ gau -h
 | `--fp`        | remove different parameters of the same endpoint                                            | gau --fp                                  |
 | `--fp-cap`    | max --fp dedup entries (0 = unbounded; LRU eviction past the cap)                           | gau --fp --fp-cap 100000                  |
 | `--json`      | output as json                                                                              | gau --json                                |
+| `--match-ext` | only emit URLs whose path ends in one of these extensions (allow-list; compound extensions like `tar.gz` supported) | gau --match-ext sql,bak,zip,tar.gz |
+| `--match-regex` | only emit URLs matching at least one Go regex pattern; use `(?i)` for case-insensitive    | gau --match-regex '/admin,\.php$'         |
 | `--mc`        | list of status codes to match                                                               | gau --mc 200,500                          |
 | `--mt`        | list of mime-types to match                                                                 | gau --mt text/html,application/json       |
 | `--o`         | filename to write results to                                                                | gau --o out.txt                           |
@@ -52,6 +54,34 @@ $ gau -h
 | `--to`        | fetch urls to date (format: YYYYMM)                                                         | gau example.com --to 202101               |
 | `--verbose`   | show verbose output                                                                         | gau --verbose example.com                 |
 | `--version`   | show gau version                                                                            | gau --version                             |
+
+### Filtering URLs
+
+Filters compose AND-style; a URL must pass every active filter to be emitted.
+The pipeline runs in this order (most-discriminating first):
+
+1. **`--match-ext`** allow-list by extension. Compound extensions like
+   `tar.gz` work via suffix matching, not last-segment matching.
+2. **`--match-regex`** allow-list by Go regex. Use `(?i)admin` for
+   case-insensitive matching. Multiple patterns join as OR — a URL passes if
+   it matches **any** pattern.
+3. **`--blacklist`** deny-list by extension (case-insensitive last-segment
+   match).
+4. **`--fp`** dedup by host+path, capped via `--fp-cap` (default 1M, LRU
+   eviction).
+
+Recon recipes:
+
+```bash
+# Backup-file hunt: only emit URLs that look like exposed backups
+gau example.com --match-ext sql,bak,zip,tar.gz,7z,rar,gz
+
+# Admin-panel discovery
+gau example.com --match-regex '/admin,/dashboard,/manage'
+
+# PHP files under any /api/ path
+gau example.com --match-regex '/api/.*\.php$'
+```
 
 ### Rate limiting
 

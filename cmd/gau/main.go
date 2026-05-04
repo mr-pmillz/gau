@@ -43,15 +43,23 @@ func main() {
 		defer func() { _ = out.Close() }()
 	}
 
+	writeOpts := output.WriteOptions{
+		Blacklist:        config.Blacklist,
+		MatchExtensions:  config.MatchExtensions,
+		MatchRegex:       config.MatchRegex,
+		RemoveParameters: config.RemoveParameters,
+		DedupCap:         config.FPCap,
+	}
+
 	var writeWg sync.WaitGroup
 	writeWg.Add(1)
 	go func(out io.Writer, useJSON bool) {
 		defer writeWg.Done()
 		if useJSON {
-			output.WriteURLsJSON(out, results, config.Blacklist, config.RemoveParameters, config.FPCap)
+			output.WriteURLsJSON(out, results, writeOpts)
 			return
 		}
-		if werr := output.WriteURLs(out, results, config.Blacklist, config.RemoveParameters, config.FPCap); werr != nil {
+		if werr := output.WriteURLs(out, results, writeOpts); werr != nil {
 			log.Fatalf("error writing results: %v\n", werr)
 		}
 	}(out, config.JSON)

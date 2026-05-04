@@ -2,6 +2,7 @@ package providers
 
 import (
 	"context"
+	"regexp"
 
 	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/valyala/fasthttp"
@@ -69,4 +70,13 @@ type Config struct {
 	// RateLimits sets per-provider request rates. Zero per-provider value
 	// means no rate-limiting for that provider.
 	RateLimits RateLimits
+
+	// MatchExtensions, when non-empty, restricts emitted URLs to those whose
+	// path ends in (a case-insensitive `.` + one of) these extensions. Use
+	// without leading dot. Compound extensions like "tar.gz" are supported.
+	MatchExtensions []string
+
+	// MatchRegex, when non-empty, restricts emitted URLs to those matching at
+	// least one of these compiled regexes. Match is against the full URL.
+	MatchRegex []*regexp.Regexp
 }

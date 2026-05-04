@@ -1,5 +1,7 @@
 // Package output writes the URLs collected by providers to a writer (stdout
-// or a file). It centralizes blacklist filtering and --fp dedup.
+// or a file). It centralizes the filter pipeline applied before emission:
+// match-ext (allow-list by extension), match-regex (allow-list by pattern),
+// blacklist (deny-list by extension), and --fp dedup.
 package output
 
 import (
@@ -7,6 +9,7 @@ import (
 	"io"
 	"net/url"
 	"path"
+	"regexp"
 	"strings"
 
 	mapset "github.com/deckarep/golang-set/v2"
@@ -23,23 +26,48 @@ type JSONResult struct {
 // --fp-cap flag into this argument.
 const dedupCapDefault = 1_000_000
 
-// WriteURLs streams URLs from results to writer, applying blacklist filtering
-// and (when removeParameters is true) dedup keyed by host+path.
-//
-// dedupCap caps the dedup set to that many entries via LRU eviction, bounding
-// memory at the cost of possibly emitting a duplicate when an evicted entry
-// is seen again. dedupCap == 0 disables the cap (unbounded).
-func WriteURLs(writer io.Writer, results <-chan string, blacklistMap mapset.Set[string], removeParameters bool, dedupCap uint) error {
-	dedup := newLRU(int(dedupCap))
+// DedupCapDefault is the default --fp-cap when the user doesn't override it.
+// Exported for use by runner/flags.
+const DedupCapDefault = dedupCapDefault
+
+// WriteOptions bundles the parameters that govern URL emission. It exists
+// because there are now five filter inputs and a positional-arg signature
+// would be unreadable.
+type WriteOptions struct {
+	// Blacklist excludes URLs whose path extension (case-insensitive) is
+	// in this set. The empty string is always added so URLs with no
+	// extension are not blacklisted.
+	Blacklist mapset.Set[string]
+
+	// MatchExtensions, when non-empty, restricts emission to URLs whose
+	// path ends in (`.` + one of) these entries. Lowercased. Compound
+	// extensions like "tar.gz" are supported via HasSuffix.
+	MatchExtensions []string
+
+	// MatchRegex, when non-empty, restricts emission to URLs matching at
+	// least one of these patterns. Match is against the full URL.
+	MatchRegex []*regexp.Regexp
+
+	// RemoveParameters dedupes by host+path (the --fp flag).
+	RemoveParameters bool
+
+	// DedupCap caps the dedup set; 0 means unbounded.
+	DedupCap uint
+}
+
+// WriteURLs streams URLs from results to writer, applying the full filter
+// pipeline. URLs that fail to parse are skipped silently.
+func WriteURLs(writer io.Writer, results <-chan string, opts WriteOptions) error {
+	dedup := newLRU(int(opts.DedupCap))
 	for result := range results {
 		u, err := url.Parse(result)
 		if err != nil {
 			continue
 		}
-		if isBlacklisted(u, blacklistMap) {
+		if !passesFilters(result, u, opts) {
 			continue
 		}
-		if removeParameters {
+		if opts.RemoveParameters {
 			key := u.Host + u.Path
 			if dedup.contains(key) {
 				continue
@@ -59,22 +87,21 @@ func WriteURLs(writer io.Writer, results <-chan string, blacklistMap mapset.Set[
 	return nil
 }
 
-// WriteURLsJSON is the JSON variant of WriteURLs. Errors writing individual
-// records are skipped to match prior behavior — encoder.Encode is the only
-// failure mode and recovering on a per-record basis is the right call for a
-// streaming tool.
-func WriteURLsJSON(writer io.Writer, results <-chan string, blacklistMap mapset.Set[string], removeParameters bool, dedupCap uint) {
-	dedup := newLRU(int(dedupCap))
+// WriteURLsJSON is the JSON variant of WriteURLs. Encoder errors on individual
+// records are skipped to match prior behavior — recovering on a per-record
+// basis is the right call for a streaming tool.
+func WriteURLsJSON(writer io.Writer, results <-chan string, opts WriteOptions) {
+	dedup := newLRU(int(opts.DedupCap))
 	enc := jsoniter.NewEncoder(writer)
 	for result := range results {
 		u, err := url.Parse(result)
 		if err != nil {
 			continue
 		}
-		if isBlacklisted(u, blacklistMap) {
+		if !passesFilters(result, u, opts) {
 			continue
 		}
-		if removeParameters {
+		if opts.RemoveParameters {
 			key := u.Host + u.Path
 			if dedup.contains(key) {
 				continue
@@ -85,9 +112,55 @@ func WriteURLsJSON(writer io.Writer, results <-chan string, blacklistMap mapset.
 	}
 }
 
+// passesFilters returns true when the URL should be emitted under opts.
+// Filter order is most-discriminating first (cheapest rejection):
+// match-ext, match-regex, then blacklist.
+func passesFilters(rawURL string, u *url.URL, opts WriteOptions) bool {
+	if !matchesAnyExt(u, opts.MatchExtensions) {
+		return false
+	}
+	if !matchesAnyRegex(rawURL, opts.MatchRegex) {
+		return false
+	}
+	if isBlacklisted(u, opts.Blacklist) {
+		return false
+	}
+	return true
+}
+
+// matchesAnyExt returns true if exts is empty (no filter) or the URL path
+// ends in `.` + one of the entries. Compound extensions (`tar.gz`) work
+// because we use suffix matching, not path.Ext().
+func matchesAnyExt(u *url.URL, exts []string) bool {
+	if len(exts) == 0 {
+		return true
+	}
+	lower := strings.ToLower(u.Path)
+	for _, ext := range exts {
+		if strings.HasSuffix(lower, "."+ext) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchesAnyRegex returns true if patterns is empty or the URL matches at
+// least one pattern.
+func matchesAnyRegex(rawURL string, patterns []*regexp.Regexp) bool {
+	if len(patterns) == 0 {
+		return true
+	}
+	for _, re := range patterns {
+		if re.MatchString(rawURL) {
+			return true
+		}
+	}
+	return false
+}
+
 // isBlacklisted returns true when the URL's path extension is in the
-// blacklist. Extension matching is case-insensitive and excludes the leading
-// dot. URLs without an extension are never blacklisted.
+// blacklist. Extension matching is case-insensitive and excludes the
+// leading dot. URLs without an extension are never blacklisted.
 func isBlacklisted(u *url.URL, blacklist mapset.Set[string]) bool {
 	if blacklist == nil {
 		return false
@@ -140,7 +213,3 @@ func (l *lru) add(k string) {
 		}
 	}
 }
-
-// DedupCapDefault is the default --fp-cap when the user doesn't override it.
-// Exported for use by runner/flags.
-const DedupCapDefault = dedupCapDefault

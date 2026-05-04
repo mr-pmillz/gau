@@ -180,6 +180,67 @@ func TestNewFromArgs_BlacklistOverride(t *testing.T) {
 	require.Equal(t, []string{"ttf", "woff"}, cfg.Blacklist)
 }
 
+func TestNewFromArgs_MatchExtParses(t *testing.T) {
+	o := flags.NewFromArgs([]string{"--match-ext", "sql,bak,tar.gz"})
+	cfg, err := o.ReadConfigFile("/nonexistent")
+	require.Error(t, err)
+	require.Equal(t, []string{"sql", "bak", "tar.gz"}, cfg.MatchExtensions)
+}
+
+func TestProviderConfig_MatchExtIsLowercasedAndDotStripped(t *testing.T) {
+	o := flags.NewFromArgs(nil)
+	cfg := o.DefaultConfig()
+	cfg.MatchExtensions = []string{".SQL", "BAK", " zip "}
+	pc, err := cfg.ProviderConfig()
+	require.NoError(t, err)
+	require.Equal(t, []string{"sql", "bak", "zip"}, pc.MatchExtensions,
+		"flags must normalize: lowercase, trim leading dot, trim spaces")
+}
+
+func TestNewFromArgs_MatchRegexParses(t *testing.T) {
+	o := flags.NewFromArgs([]string{"--match-regex", `/admin,\.php$`})
+	cfg, err := o.ReadConfigFile("/nonexistent")
+	require.Error(t, err)
+	require.Equal(t, []string{`/admin`, `\.php$`}, cfg.MatchRegex)
+
+	pc, perr := cfg.ProviderConfig()
+	require.NoError(t, perr)
+	require.Len(t, pc.MatchRegex, 2)
+	require.True(t, pc.MatchRegex[0].MatchString("https://example.com/admin"))
+	require.True(t, pc.MatchRegex[1].MatchString("https://example.com/index.php"))
+}
+
+func TestProviderConfig_RejectsInvalidRegex(t *testing.T) {
+	o := flags.NewFromArgs(nil)
+	cfg := o.DefaultConfig()
+	cfg.MatchRegex = []string{"valid", "(unclosed"}
+	_, err := cfg.ProviderConfig()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid --match-regex pattern")
+	require.Contains(t, err.Error(), "(unclosed")
+}
+
+func TestProviderConfig_EmptyMatchRegexEntriesAreSkipped(t *testing.T) {
+	o := flags.NewFromArgs(nil)
+	cfg := o.DefaultConfig()
+	cfg.MatchRegex = []string{"valid", "", "also-valid"}
+	pc, err := cfg.ProviderConfig()
+	require.NoError(t, err)
+	require.Len(t, pc.MatchRegex, 2, "empty regex strings must be silently skipped")
+}
+
+func TestReadConfigFile_MatchFiltersFromTOML(t *testing.T) {
+	body := `
+matchextensions = ["sql", "bak"]
+matchregex = ["/admin", "/api"]
+`
+	o := flags.NewFromArgs(nil)
+	cfg, err := o.ReadConfigFile(withConfigFile(t, body))
+	require.NoError(t, err)
+	require.Equal(t, []string{"sql", "bak"}, cfg.MatchExtensions)
+	require.Equal(t, []string{"/admin", "/api"}, cfg.MatchRegex)
+}
+
 func TestNewFromArgs_TimeoutAndRetriesOverride(t *testing.T) {
 	o := flags.NewFromArgs([]string{"--timeout", "10", "--retries", "20"})
 	cfg, err := o.ReadConfigFile("/nonexistent")

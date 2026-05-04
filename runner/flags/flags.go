@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -60,6 +61,8 @@ type Config struct {
 	RemoveParameters  bool              `mapstructure:"parameters"`
 	Providers         []string          `mapstructure:"providers"`
 	Blacklist         []string          `mapstructure:"blacklist"`
+	MatchExtensions   []string          `mapstructure:"matchextensions"`
+	MatchRegex        []string          `mapstructure:"matchregex"`
 	JSON              bool              `mapstructure:"json"`
 	URLScan           URLScanConfig     `mapstructure:"urlscan"`
 	OTX               string            `mapstructure:"otx"`
@@ -86,6 +89,12 @@ func (c *Config) ProviderConfig() (*providers.Config, error) {
 		default:
 			return nil, fmt.Errorf("unsupported proxy scheme: %s", parse.Scheme)
 		}
+	}
+
+	matchExt := lowerSlice(c.MatchExtensions)
+	matchRegex, err := compileRegex(c.MatchRegex)
+	if err != nil {
+		return nil, err
 	}
 
 	pc := &providers.Config{
@@ -118,6 +127,8 @@ func (c *Config) ProviderConfig() (*providers.Config, error) {
 			OTX:         c.RateLimit.OTX,
 			URLScan:     c.RateLimit.URLScan,
 		},
+		MatchExtensions: matchExt,
+		MatchRegex:      matchRegex,
 	}
 
 	log.SetLevel(log.ErrorLevel)
@@ -127,6 +138,43 @@ func (c *Config) ProviderConfig() (*providers.Config, error) {
 	pc.Blacklist = mapset.NewThreadUnsafeSet(c.Blacklist...)
 	pc.Blacklist.Add("")
 	return pc, nil
+}
+
+// compileRegex compiles each pattern with regexp.Compile, surfacing the first
+// error so the user gets immediate feedback on bad input rather than silently
+// dropping all URLs at runtime.
+func compileRegex(patterns []string) ([]*regexp.Regexp, error) {
+	if len(patterns) == 0 {
+		return nil, nil
+	}
+	out := make([]*regexp.Regexp, 0, len(patterns))
+	for _, p := range patterns {
+		if p == "" {
+			continue
+		}
+		re, err := regexp.Compile(p)
+		if err != nil {
+			return nil, fmt.Errorf("invalid --match-regex pattern %q: %w", p, err)
+		}
+		out = append(out, re)
+	}
+	return out, nil
+}
+
+// lowerSlice returns a new slice with each element lowercased.
+func lowerSlice(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		out = append(out, strings.ToLower(strings.TrimPrefix(s, ".")))
+	}
+	return out
 }
 
 // Options is the flag-parser owner. It wraps a viper instance and the
@@ -175,6 +223,8 @@ func registerFlags(fs *pflag.FlagSet) {
 	fs.Uint("retries", 0, "retries for HTTP client")
 	fs.String("proxy", "", "http proxy to use")
 	fs.StringSlice("blacklist", []string{}, "list of extensions to skip")
+	fs.StringSlice("match-ext", []string{}, "only emit URLs whose path ends in one of these extensions (allow-list; supports compound like tar.gz)")
+	fs.StringSlice("match-regex", []string{}, "only emit URLs matching at least one of these regex patterns (Go syntax; use (?i) for case-insensitive)")
 	fs.StringSlice("providers", []string{}, "list of providers to use (wayback,commoncrawl,otx,urlscan)")
 	fs.Bool("subs", false, "include subdomains of target domain")
 	fs.Bool("fp", false, "remove different parameters of the same endpoint")
@@ -316,6 +366,12 @@ func (o *Options) applyFlagOverrides(c *Config) {
 	}
 	if o.isFlagSet("blacklist") {
 		c.Blacklist = o.viper.GetStringSlice("blacklist")
+	}
+	if o.isFlagSet("match-ext") {
+		c.MatchExtensions = o.viper.GetStringSlice("match-ext")
+	}
+	if o.isFlagSet("match-regex") {
+		c.MatchRegex = o.viper.GetStringSlice("match-regex")
 	}
 	if o.isFlagSet("providers") {
 		c.Providers = o.viper.GetStringSlice("providers")
