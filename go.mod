@@ -1,6 +1,6 @@
-module github.com/lc/gau/v2
+module github.com/mr-pmillz/gau/v2
 
-go 1.20
+go 1.26.2
 
 require (
 	github.com/bobesa/go-domain-util v0.0.0-20190911083921-4033b5f7dd89
