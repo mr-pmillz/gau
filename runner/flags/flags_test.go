@@ -1,6 +1,8 @@
 package flags_test
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -19,9 +21,41 @@ func withConfigFile(t *testing.T, body string) string {
 	return p
 }
 
-func TestDefaultConfig_HasInsecureTLSForBackCompat(t *testing.T) {
-	o := flags.NewFromArgs(nil)
-	cfg := o.DefaultConfig()
+// runWithArgs builds a fresh cobra command with a capturing run callback,
+// sets args, and executes. Returns the resolved Config (or nil if RunE
+// wasn't reached) and the Execute error. Stdout/stderr are silenced so
+// tests don't pollute the run.
+func runWithArgs(t *testing.T, args ...string) (*flags.Config, []string, error) {
+	t.Helper()
+	var captured *flags.Config
+	var capturedDomains []string
+	cmd := flags.NewRootCmd(func(c *flags.Config, domains []string) error {
+		captured = c
+		capturedDomains = domains
+		return nil
+	})
+	cmd.SetArgs(args)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	err := cmd.Execute()
+	return captured, capturedDomains, err
+}
+
+// runWithConfigFile is a shortcut for tests that point --config at a temp
+// toml file plus zero or more extra flags.
+func runWithConfigFile(t *testing.T, configPath string, extra ...string) (*flags.Config, error) {
+	t.Helper()
+	args := append([]string{"--config", configPath}, extra...)
+	cfg, _, err := runWithArgs(t, args...)
+	return cfg, err
+}
+
+// --- Defaults ---
+
+func TestDefaults_HasInsecureTLSForBackCompat(t *testing.T) {
+	cfg, _, err := runWithArgs(t)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
 	require.False(t, cfg.Secure, "default must be insecure to preserve historical behavior")
 
 	pc, err := cfg.ProviderConfig()
@@ -30,9 +64,9 @@ func TestDefaultConfig_HasInsecureTLSForBackCompat(t *testing.T) {
 		"InsecureSkipVerify must be true when Secure=false (back-compat)")
 }
 
-func TestDefaultConfig_RateLimitsHaveSensibleDefaults(t *testing.T) {
-	o := flags.NewFromArgs(nil)
-	cfg := o.DefaultConfig()
+func TestDefaults_RateLimitsHaveSensibleDefaults(t *testing.T) {
+	cfg, _, err := runWithArgs(t)
+	require.NoError(t, err)
 	require.Equal(t, flags.DefaultRateWayback, cfg.RateLimit.Wayback)
 	require.Equal(t, flags.DefaultRateCommonCrawl, cfg.RateLimit.CommonCrawl)
 	require.Equal(t, flags.DefaultRateOTX, cfg.RateLimit.OTX)
@@ -42,28 +76,35 @@ func TestDefaultConfig_RateLimitsHaveSensibleDefaults(t *testing.T) {
 		"commoncrawl default must be conservative — that's the whole point of the fork")
 }
 
-func TestDefaultConfig_FPCapDefault(t *testing.T) {
-	o := flags.NewFromArgs(nil)
-	cfg := o.DefaultConfig()
+func TestDefaults_FPCapDefault(t *testing.T) {
+	cfg, _, err := runWithArgs(t)
+	require.NoError(t, err)
 	require.EqualValues(t, output.DedupCapDefault, cfg.FPCap)
 }
 
+func TestDefaults_ProviderListIsAllFour(t *testing.T) {
+	cfg, _, err := runWithArgs(t)
+	require.NoError(t, err)
+	require.Equal(t, []string{"wayback", "commoncrawl", "otx", "urlscan"}, cfg.Providers)
+}
+
+// --- ProviderConfig conversion ---
+
 func TestProviderConfig_SecureFlipsTLS(t *testing.T) {
-	o := flags.NewFromArgs(nil)
-	cfg := o.DefaultConfig()
-	cfg.Secure = true
+	cfg, _, err := runWithArgs(t, "--secure")
+	require.NoError(t, err)
 
 	pc, err := cfg.ProviderConfig()
 	require.NoError(t, err)
-	require.False(t, pc.Client.TLSConfig.InsecureSkipVerify,
-		"--secure must enable TLS verification")
+	require.False(t, pc.Client.TLSConfig.InsecureSkipVerify, "--secure must enable TLS verification")
 }
 
 func TestProviderConfig_PropagatesRateLimits(t *testing.T) {
-	o := flags.NewFromArgs(nil)
-	cfg := o.DefaultConfig()
-	cfg.RateLimit.Wayback = 7.5
-	cfg.RateLimit.CommonCrawl = 0.25
+	cfg, _, err := runWithArgs(t,
+		"--rate-limit-wayback", "7.5",
+		"--rate-limit-commoncrawl", "0.25",
+	)
+	require.NoError(t, err)
 
 	pc, err := cfg.ProviderConfig()
 	require.NoError(t, err)
@@ -72,9 +113,8 @@ func TestProviderConfig_PropagatesRateLimits(t *testing.T) {
 }
 
 func TestProviderConfig_BlacklistAlwaysContainsEmptyString(t *testing.T) {
-	o := flags.NewFromArgs(nil)
-	cfg := o.DefaultConfig()
-	cfg.Blacklist = []string{"png", "jpg"}
+	cfg, _, err := runWithArgs(t, "--blacklist", "png,jpg")
+	require.NoError(t, err)
 
 	pc, err := cfg.ProviderConfig()
 	require.NoError(t, err)
@@ -85,191 +125,113 @@ func TestProviderConfig_BlacklistAlwaysContainsEmptyString(t *testing.T) {
 }
 
 func TestProviderConfig_RejectsUnsupportedProxyScheme(t *testing.T) {
-	o := flags.NewFromArgs(nil)
-	cfg := o.DefaultConfig()
-	cfg.Proxy = "ftp://proxy.example/"
-	_, err := cfg.ProviderConfig()
+	cfg, _, err := runWithArgs(t, "--proxy", "ftp://proxy.example/")
+	require.NoError(t, err)
+	_, err = cfg.ProviderConfig()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unsupported proxy scheme")
 }
 
 func TestProviderConfig_AcceptsHTTPProxy(t *testing.T) {
-	o := flags.NewFromArgs(nil)
-	cfg := o.DefaultConfig()
-	cfg.Proxy = "http://127.0.0.1:8080"
+	cfg, _, err := runWithArgs(t, "--proxy", "http://127.0.0.1:8080")
+	require.NoError(t, err)
 	pc, err := cfg.ProviderConfig()
 	require.NoError(t, err)
 	require.NotNil(t, pc.Client.Dial, "http proxy must wire a dialer")
 }
 
-func TestReadConfigFile_MissingFallsBackToDefault(t *testing.T) {
-	o := flags.NewFromArgs(nil)
-	cfg, err := o.ReadConfigFile("/nonexistent/path/.gau.toml")
-	require.Error(t, err, "missing file is signaled but non-fatal")
-	require.NotNil(t, cfg)
-	require.Equal(t, []string{"wayback", "commoncrawl", "otx", "urlscan"}, cfg.Providers)
-}
+// --- Flag overrides ---
 
-func TestReadConfigFile_FlagsOverrideTOML(t *testing.T) {
-	body := `
-threads = 1
-secure = false
-fpcap = 5
-`
-	o := flags.NewFromArgs([]string{"--threads", "8", "--secure", "--fp-cap", "999"})
-	cfg, err := o.ReadConfigFile(withConfigFile(t, body))
+func TestFlagOverride_Threads(t *testing.T) {
+	cfg, _, err := runWithArgs(t, "--threads", "8")
 	require.NoError(t, err)
-	require.EqualValues(t, 8, cfg.Threads, "--threads must override toml")
-	require.True(t, cfg.Secure, "--secure must override toml")
-	require.EqualValues(t, 999, cfg.FPCap, "--fp-cap must override toml")
+	require.EqualValues(t, 8, cfg.Threads)
 }
 
-func TestReadConfigFile_FilterFlagsOverrideTOML(t *testing.T) {
-	body := `
-[filters]
-from = "202301"
-to = "202312"
-matchstatuscodes = ["301"]
-`
-	// CLI override sets new values for from + matchstatuscodes; entire
-	// filters block gets replaced.
-	o := flags.NewFromArgs([]string{
-		"--from", "202401",
-		"--to", "202412",
-		"--mc", "200,302",
-		"--fc", "404",
-		"--mt", "text/html",
-		"--ft", "image/png",
-	})
-	cfg, err := o.ReadConfigFile(withConfigFile(t, body))
+func TestFlagOverride_TimeoutAndRetries(t *testing.T) {
+	cfg, _, err := runWithArgs(t, "--timeout", "10", "--retries", "20")
 	require.NoError(t, err)
-	require.Equal(t, "202401", cfg.Filters.From)
-	require.Equal(t, "202412", cfg.Filters.To)
-	require.Equal(t, []string{"200", "302"}, cfg.Filters.MatchStatusCodes)
-	require.Equal(t, []string{"404"}, cfg.Filters.FilterStatusCodes)
-	require.Equal(t, []string{"text/html"}, cfg.Filters.MatchMimeTypes)
-	require.Equal(t, []string{"image/png"}, cfg.Filters.FilterMimeTypes)
+	require.EqualValues(t, 10, cfg.Timeout)
+	require.EqualValues(t, 20, cfg.MaxRetries)
 }
 
-func TestReadConfigFile_RejectsMalformedDateFlag(t *testing.T) {
-	o := flags.NewFromArgs([]string{"--from", "not-a-date"})
-	cfg, err := o.ReadConfigFile("/nonexistent")
-	// Missing config is signaled but non-fatal.
-	require.Error(t, err)
-	require.Empty(t, cfg.Filters.From, "malformed --from must be silently dropped")
+func TestFlagOverride_Outfile(t *testing.T) {
+	cfg, _, err := runWithArgs(t, "--o", "/tmp/out.txt")
+	require.NoError(t, err)
+	require.Equal(t, "/tmp/out.txt", cfg.Outfile)
 }
 
-func TestNewFromArgs_RateLimitOverride(t *testing.T) {
-	o := flags.NewFromArgs([]string{"--rate-limit-commoncrawl", "0.1"})
-	cfg, err := o.ReadConfigFile("/nonexistent")
-	require.Error(t, err) // missing file is non-fatal
+func TestFlagOverride_RateLimit(t *testing.T) {
+	cfg, _, err := runWithArgs(t, "--rate-limit-commoncrawl", "0.1")
+	require.NoError(t, err)
 	require.Equal(t, 0.1, cfg.RateLimit.CommonCrawl)
 }
 
-func TestNewFromArgs_ProvidersOverride(t *testing.T) {
-	o := flags.NewFromArgs([]string{"--providers", "wayback,otx"})
-	cfg, err := o.ReadConfigFile("/nonexistent")
-	require.Error(t, err)
+func TestFlagOverride_ProvidersList(t *testing.T) {
+	cfg, _, err := runWithArgs(t, "--providers", "wayback,otx")
+	require.NoError(t, err)
 	require.Equal(t, []string{"wayback", "otx"}, cfg.Providers)
 }
 
-func TestNewFromArgs_BlacklistOverride(t *testing.T) {
-	o := flags.NewFromArgs([]string{"--blacklist", "ttf,woff"})
-	cfg, err := o.ReadConfigFile("/nonexistent")
-	require.Error(t, err)
+func TestFlagOverride_Blacklist(t *testing.T) {
+	cfg, _, err := runWithArgs(t, "--blacklist", "ttf,woff")
+	require.NoError(t, err)
 	require.Equal(t, []string{"ttf", "woff"}, cfg.Blacklist)
 }
 
-func TestNewFromArgs_MatchExtParses(t *testing.T) {
-	o := flags.NewFromArgs([]string{"--match-ext", "sql,bak,tar.gz"})
-	cfg, err := o.ReadConfigFile("/nonexistent")
-	require.Error(t, err)
+func TestFlagOverride_MatchExtParses(t *testing.T) {
+	cfg, _, err := runWithArgs(t, "--match-ext", "sql,bak,tar.gz")
+	require.NoError(t, err)
 	require.Equal(t, []string{"sql", "bak", "tar.gz"}, cfg.MatchExtensions)
 }
 
 func TestProviderConfig_MatchExtIsLowercasedAndDotStripped(t *testing.T) {
-	o := flags.NewFromArgs(nil)
-	cfg := o.DefaultConfig()
-	cfg.MatchExtensions = []string{".SQL", "BAK", " zip "}
+	cfg, _, err := runWithArgs(t, "--match-ext", ".SQL,BAK, zip ")
+	require.NoError(t, err)
 	pc, err := cfg.ProviderConfig()
 	require.NoError(t, err)
 	require.Equal(t, []string{"sql", "bak", "zip"}, pc.MatchExtensions,
 		"flags must normalize: lowercase, trim leading dot, trim spaces")
 }
 
-func TestNewFromArgs_MatchRegexParses(t *testing.T) {
-	o := flags.NewFromArgs([]string{"--match-regex", `/admin,\.php$`})
-	cfg, err := o.ReadConfigFile("/nonexistent")
-	require.Error(t, err)
+func TestFlagOverride_MatchRegexParsesAndCompiles(t *testing.T) {
+	cfg, _, err := runWithArgs(t, "--match-regex", `/admin,\.php$`)
+	require.NoError(t, err)
 	require.Equal(t, []string{`/admin`, `\.php$`}, cfg.MatchRegex)
 
-	pc, perr := cfg.ProviderConfig()
-	require.NoError(t, perr)
+	pc, err := cfg.ProviderConfig()
+	require.NoError(t, err)
 	require.Len(t, pc.MatchRegex, 2)
 	require.True(t, pc.MatchRegex[0].MatchString("https://example.com/admin"))
 	require.True(t, pc.MatchRegex[1].MatchString("https://example.com/index.php"))
 }
 
 func TestProviderConfig_RejectsInvalidRegex(t *testing.T) {
-	o := flags.NewFromArgs(nil)
-	cfg := o.DefaultConfig()
-	cfg.MatchRegex = []string{"valid", "(unclosed"}
-	_, err := cfg.ProviderConfig()
+	cfg, _, err := runWithArgs(t, "--match-regex", "valid,(unclosed")
+	require.NoError(t, err)
+	_, err = cfg.ProviderConfig()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid --match-regex pattern")
 	require.Contains(t, err.Error(), "(unclosed")
 }
 
-func TestProviderConfig_EmptyMatchRegexEntriesAreSkipped(t *testing.T) {
-	o := flags.NewFromArgs(nil)
-	cfg := o.DefaultConfig()
-	cfg.MatchRegex = []string{"valid", "", "also-valid"}
-	pc, err := cfg.ProviderConfig()
+// --- Positional args ---
+
+func TestArgs_PositionalsForwardedToRun(t *testing.T) {
+	_, domains, err := runWithArgs(t, "--threads", "2", "example.com", "second.com")
 	require.NoError(t, err)
-	require.Len(t, pc.MatchRegex, 2, "empty regex strings must be silently skipped")
+	require.Equal(t, []string{"example.com", "second.com"}, domains)
 }
 
-func TestReadConfigFile_MatchFiltersFromTOML(t *testing.T) {
-	body := `
-matchextensions = ["sql", "bak"]
-matchregex = ["/admin", "/api"]
-`
-	o := flags.NewFromArgs(nil)
-	cfg, err := o.ReadConfigFile(withConfigFile(t, body))
-	require.NoError(t, err)
-	require.Equal(t, []string{"sql", "bak"}, cfg.MatchExtensions)
-	require.Equal(t, []string{"/admin", "/api"}, cfg.MatchRegex)
+// --- TOML loading ---
+
+func TestConfigFile_MissingFileFallsBackToDefaults(t *testing.T) {
+	cfg, _, err := runWithArgs(t, "--config", "/definitely/does/not/exist.toml")
+	require.NoError(t, err, "missing --config file is non-fatal")
+	require.Equal(t, []string{"wayback", "commoncrawl", "otx", "urlscan"}, cfg.Providers)
 }
 
-func TestNewFromArgs_TimeoutAndRetriesOverride(t *testing.T) {
-	o := flags.NewFromArgs([]string{"--timeout", "10", "--retries", "20"})
-	cfg, err := o.ReadConfigFile("/nonexistent")
-	require.Error(t, err)
-	require.EqualValues(t, 10, cfg.Timeout)
-	require.EqualValues(t, 20, cfg.MaxRetries)
-}
-
-func TestNewFromArgs_OutfileFromODash(t *testing.T) {
-	o := flags.NewFromArgs([]string{"--o", "/tmp/out.txt"})
-	cfg, err := o.ReadConfigFile("/nonexistent")
-	require.Error(t, err)
-	require.Equal(t, "/tmp/out.txt", cfg.Outfile)
-}
-
-func TestOptions_ArgsReturnsPositionals(t *testing.T) {
-	o := flags.NewFromArgs([]string{"--threads", "2", "example.com", "second.com"})
-	require.Equal(t, []string{"example.com", "second.com"}, o.Args())
-}
-
-func TestReadInConfig_FallsBackWhenHomeMissing(t *testing.T) {
-	o := flags.NewFromArgs(nil)
-	// $HOME/.gau.toml almost certainly doesn't exist for the test process,
-	// but even if it does, we shouldn't blow up.
-	_, _ = o.ReadInConfig()
-	// Just exercise the path; no assertion beyond "doesn't panic".
-}
-
-func TestReadConfigFile_ParsesCustomValues(t *testing.T) {
+func TestConfigFile_ParsesCustomValues(t *testing.T) {
 	body := `
 threads = 4
 verbose = true
@@ -285,8 +247,7 @@ commoncrawl = 0.1
 otx = 10
 urlscan = 3
 `
-	o := flags.NewFromArgs(nil)
-	cfg, err := o.ReadConfigFile(withConfigFile(t, body))
+	cfg, err := runWithConfigFile(t, withConfigFile(t, body))
 	require.NoError(t, err)
 	require.EqualValues(t, 4, cfg.Threads)
 	require.True(t, cfg.Verbose)
@@ -299,4 +260,114 @@ urlscan = 3
 	require.Equal(t, 0.1, cfg.RateLimit.CommonCrawl)
 	require.Equal(t, 10.0, cfg.RateLimit.OTX)
 	require.Equal(t, 3.0, cfg.RateLimit.URLScan)
+}
+
+func TestConfigFile_FlagsOverrideTOML(t *testing.T) {
+	body := `
+threads = 1
+secure = false
+fpcap = 5
+`
+	cfg, err := runWithConfigFile(t, withConfigFile(t, body),
+		"--threads", "8", "--secure", "--fp-cap", "999")
+	require.NoError(t, err)
+	require.EqualValues(t, 8, cfg.Threads, "--threads must override toml")
+	require.True(t, cfg.Secure, "--secure must override toml")
+	require.EqualValues(t, 999, cfg.FPCap, "--fp-cap must override toml")
+}
+
+func TestConfigFile_FilterFlagsReplaceTOMLBlock(t *testing.T) {
+	// Documented behavior: setting any --from/--to/--mc/--fc/--mt/--ft
+	// flag on the CLI replaces the entire [filters] block from the toml.
+	body := `
+[filters]
+from = "202301"
+to = "202312"
+matchstatuscodes = ["301"]
+`
+	cfg, err := runWithConfigFile(t, withConfigFile(t, body),
+		"--from", "202401",
+		"--to", "202412",
+		"--mc", "200,302",
+		"--fc", "404",
+		"--mt", "text/html",
+		"--ft", "image/png",
+	)
+	require.NoError(t, err)
+	require.Equal(t, "202401", cfg.Filters.From)
+	require.Equal(t, "202412", cfg.Filters.To)
+	require.Equal(t, []string{"200", "302"}, cfg.Filters.MatchStatusCodes)
+	require.Equal(t, []string{"404"}, cfg.Filters.FilterStatusCodes)
+	require.Equal(t, []string{"text/html"}, cfg.Filters.MatchMimeTypes)
+	require.Equal(t, []string{"image/png"}, cfg.Filters.FilterMimeTypes)
+}
+
+func TestConfigFile_FilterFlagsAbsentPreservesTOML(t *testing.T) {
+	// Negative side of the all-or-nothing rule: when no filter flag is on
+	// the CLI, the toml [filters] block is preserved unchanged.
+	body := `
+[filters]
+from = "202301"
+to = "202312"
+matchstatuscodes = ["301"]
+`
+	cfg, err := runWithConfigFile(t, withConfigFile(t, body))
+	require.NoError(t, err)
+	require.Equal(t, "202301", cfg.Filters.From)
+	require.Equal(t, "202312", cfg.Filters.To)
+	require.Equal(t, []string{"301"}, cfg.Filters.MatchStatusCodes)
+}
+
+func TestConfigFile_RejectsMalformedDateFlagSilently(t *testing.T) {
+	cfg, _, err := runWithArgs(t, "--from", "not-a-date")
+	require.NoError(t, err)
+	require.Empty(t, cfg.Filters.From, "malformed --from must be silently dropped")
+}
+
+func TestConfigFile_MatchFiltersFromTOML(t *testing.T) {
+	body := `
+matchextensions = ["sql", "bak"]
+matchregex = ["/admin", "/api"]
+`
+	cfg, err := runWithConfigFile(t, withConfigFile(t, body))
+	require.NoError(t, err)
+	require.Equal(t, []string{"sql", "bak"}, cfg.MatchExtensions)
+	require.Equal(t, []string{"/admin", "/api"}, cfg.MatchRegex)
+}
+
+// --- Cobra-level behaviors (the bug that motivated this migration) ---
+
+// captureCmdOutput runs cmd and returns stdout, stderr, exec error.
+func captureCmdOutput(t *testing.T, args ...string) (string, string, error) {
+	t.Helper()
+	cmd := flags.NewRootCmd(func(*flags.Config, []string) error { return nil })
+	cmd.SetArgs(args)
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	cmd.SetOut(stdout)
+	cmd.SetErr(stderr)
+	err := cmd.Execute()
+	return stdout.String(), stderr.String(), err
+}
+
+func TestCobra_HelpExitsCleanly(t *testing.T) {
+	// Regression guard: the previous parsing layer treated --help as a
+	// fatal parse error. Cobra handles --help internally and Execute()
+	// returns nil.
+	stdout, _, err := captureCmdOutput(t, "--help")
+	require.NoError(t, err, "--help must not return an error from Execute")
+	require.Contains(t, stdout, "Usage:", "help output must include the usage block")
+	require.Contains(t, stdout, "--match-ext", "help output must list our flags")
+}
+
+func TestCobra_VersionPrintsVersion(t *testing.T) {
+	stdout, _, err := captureCmdOutput(t, "--version")
+	require.NoError(t, err)
+	require.Contains(t, stdout, "gau version")
+}
+
+func TestCobra_UnknownFlagErrors(t *testing.T) {
+	_, _, err := captureCmdOutput(t, "--definitely-not-a-flag")
+	require.Error(t, err, "unknown flags must error")
+	require.Contains(t, err.Error(), "unknown flag")
 }

@@ -1,11 +1,17 @@
-// Package flags defines the CLI flag surface for gau and the precedence
-// rules for merging flags with the .gau.toml configuration file.
+// Package flags defines the gau CLI surface — a single root cobra command
+// whose flags are merged with $HOME/.gau.toml via viper. The package owns
+// (a) the Config value type that the rest of the project consumes,
+// (b) NewRootCmd, which wires the flags + run callback into a cobra.Command,
+// and (c) ProviderConfig, which converts a Config into the *providers.Config
+// the runner expects.
+//
+// The package does not call os.Exit, log.Fatal, or panic. All error reporting
+// goes through cobra's RunE so callers (and tests) can decide what to do.
 package flags
 
 import (
 	"crypto/tls"
 	"errors"
-	"flag"
 	"fmt"
 	"net/url"
 	"os"
@@ -15,11 +21,11 @@ import (
 	"time"
 
 	mapset "github.com/deckarep/golang-set/v2"
-	"github.com/lynxsecurity/pflag"
-	"github.com/lynxsecurity/viper"
 	"github.com/mr-pmillz/gau/v2/pkg/output"
 	"github.com/mr-pmillz/gau/v2/pkg/providers"
 	log "github.com/sirupsen/logrus"
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"github.com/valyala/fasthttp"
 	"github.com/valyala/fasthttp/fasthttpproxy"
 )
@@ -30,8 +36,8 @@ type URLScanConfig struct {
 	APIKey string `mapstructure:"apikey"`
 }
 
-// RateLimitConfig is the [ratelimit] subsection of the toml config. Each value
-// is requests-per-second. 0 means "no rate limit" for that provider.
+// RateLimitConfig is the [ratelimit] subsection of the toml config. Each
+// value is requests-per-second. 0 means "no rate limit" for that provider.
 type RateLimitConfig struct {
 	Wayback     float64 `mapstructure:"wayback"`
 	CommonCrawl float64 `mapstructure:"commoncrawl"`
@@ -141,8 +147,7 @@ func (c *Config) ProviderConfig() (*providers.Config, error) {
 }
 
 // compileRegex compiles each pattern with regexp.Compile, surfacing the first
-// error so the user gets immediate feedback on bad input rather than silently
-// dropping all URLs at runtime.
+// error so the user gets immediate feedback rather than silent drops.
 func compileRegex(patterns []string) ([]*regexp.Regexp, error) {
 	if len(patterns) == 0 {
 		return nil, nil
@@ -161,7 +166,8 @@ func compileRegex(patterns []string) ([]*regexp.Regexp, error) {
 	return out, nil
 }
 
-// lowerSlice returns a new slice with each element lowercased.
+// lowerSlice normalizes extension entries: trim whitespace, strip a leading
+// dot, lowercase. Empty entries dropped.
 func lowerSlice(in []string) []string {
 	if len(in) == 0 {
 		return nil
@@ -177,152 +183,127 @@ func lowerSlice(in []string) []string {
 	return out
 }
 
-// Options is the flag-parser owner. It wraps a viper instance and the
-// pflag.FlagSet used during this run, so multiple instances can coexist —
-// notably so unit tests can construct their own Options without colliding
-// with the global pflag.CommandLine.
-type Options struct {
-	viper *viper.Viper
-	flags *pflag.FlagSet
-	args  []string
-}
+// RunFunc is the application entry point invoked by the root command after
+// flags + config are merged.
+type RunFunc func(cfg *Config, domains []string) error
 
-// New creates an Options wired to a private pflag.FlagSet that parses
-// os.Args[1:]. It is the binary's main entry point.
-func New() *Options {
-	o := NewFromArgs(os.Args[1:])
-	lastOptions = o
-	return o
-}
-
-// NewFromArgs is the test seam: build an Options from an explicit args slice.
-// It does NOT touch the global pflag.CommandLine, so tests can call it
-// repeatedly without clashing.
-func NewFromArgs(rawArgs []string) *Options {
+// NewRootCmd builds the top-level cobra.Command. The run callback is invoked
+// once the merged Config is ready and positional args (domains) are
+// available. Each call returns a fresh command + viper instance so tests can
+// build, exercise, and discard commands independently.
+func NewRootCmd(run RunFunc) *cobra.Command {
 	v := viper.New()
-	fs := pflag.NewFlagSet("gau", pflag.ContinueOnError)
-	registerFlags(fs)
-	fs.AddGoFlagSet(flag.CommandLine)
 
-	if err := fs.Parse(rawArgs); err != nil {
-		log.Fatal(err)
-	}
-	if err := v.BindPFlags(fs); err != nil {
-		log.Fatal(err)
+	cmd := &cobra.Command{
+		Use:           "gau [flags] [domain ...]",
+		Short:         "Fetch known URLs from passive sources (Wayback, Common Crawl, OTX, URLScan).",
+		Long:          "gau (getallurls) collects archived URLs for a domain from passive recon sources without touching the target.",
+		Version:       providers.Version,
+		SilenceUsage:  true,
+		SilenceErrors: false,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig(cmd, v)
+			if err != nil {
+				return err
+			}
+			if run == nil {
+				return nil
+			}
+			return run(cfg, args)
+		},
 	}
 
-	return &Options{viper: v, flags: fs, args: fs.Args()}
+	registerFlags(cmd)
+
+	if err := v.BindPFlags(cmd.Flags()); err != nil {
+		// BindPFlags only fails if the FlagSet is malformed — programmer
+		// error, not user-facing. Surface it as a panic at command-build
+		// time so it's caught in development, not at first user invocation.
+		panic(fmt.Sprintf("flags: BindPFlags: %v", err))
+	}
+
+	return cmd
 }
 
-// registerFlags installs every CLI flag onto the given FlagSet.
-func registerFlags(fs *pflag.FlagSet) {
-	fs.String("o", "", "filename to write results to")
-	fs.String("config", "", "location of config file (default $HOME/.gau.toml or %USERPROFILE%\\.gau.toml)")
-	fs.Uint("threads", 1, "number of workers to spawn")
-	fs.Uint("timeout", 45, "timeout (in seconds) for HTTP client")
-	fs.Uint("retries", 0, "retries for HTTP client")
-	fs.String("proxy", "", "http proxy to use")
-	fs.StringSlice("blacklist", []string{}, "list of extensions to skip")
-	fs.StringSlice("match-ext", []string{}, "only emit URLs whose path ends in one of these extensions (allow-list; supports compound like tar.gz)")
-	fs.StringSlice("match-regex", []string{}, "only emit URLs matching at least one of these regex patterns (Go syntax; use (?i) for case-insensitive)")
-	fs.StringSlice("providers", []string{}, "list of providers to use (wayback,commoncrawl,otx,urlscan)")
-	fs.Bool("subs", false, "include subdomains of target domain")
-	fs.Bool("fp", false, "remove different parameters of the same endpoint")
-	fs.Uint("fp-cap", output.DedupCapDefault, "max --fp dedup entries (0 = unbounded; uses LRU eviction when exceeded)")
-	fs.Bool("verbose", false, "show verbose output")
-	fs.Bool("json", false, "output as json")
+// registerFlags installs every CLI flag onto the cobra command's FlagSet.
+func registerFlags(cmd *cobra.Command) {
+	f := cmd.Flags()
 
-	fs.Bool("secure", false, "verify TLS certificates (default false: insecure for back-compat)")
+	f.String("o", "", "filename to write results to")
+	f.String("config", "", "location of config file (default $HOME/.gau.toml or %USERPROFILE%\\.gau.toml)")
+	f.Uint("threads", 1, "number of workers to spawn")
+	f.Uint("timeout", 45, "timeout (in seconds) for HTTP client")
+	f.Uint("retries", 0, "retries for HTTP client")
+	f.String("proxy", "", "http proxy to use")
+	f.StringSlice("blacklist", nil, "list of extensions to skip")
+	f.StringSlice("match-ext", nil, "only emit URLs whose path ends in one of these extensions (allow-list; supports compound like tar.gz)")
+	f.StringSlice("match-regex", nil, "only emit URLs matching at least one of these regex patterns (Go syntax; use (?i) for case-insensitive)")
+	f.StringSlice("providers", nil, "list of providers to use (wayback,commoncrawl,otx,urlscan)")
+	f.Bool("subs", false, "include subdomains of target domain")
+	f.Bool("fp", false, "remove different parameters of the same endpoint")
+	f.Uint("fp-cap", output.DedupCapDefault, "max --fp dedup entries (0 = unbounded; uses LRU eviction when exceeded)")
+	f.Bool("verbose", false, "show verbose output")
+	f.Bool("json", false, "output as json")
 
-	fs.Float64("rate-limit-wayback", DefaultRateWayback, "wayback requests per second (0 = unlimited)")
-	fs.Float64("rate-limit-commoncrawl", DefaultRateCommonCrawl, "commoncrawl requests per second (0 = unlimited)")
-	fs.Float64("rate-limit-otx", DefaultRateOTX, "otx requests per second (0 = unlimited)")
-	fs.Float64("rate-limit-urlscan", DefaultRateURLScan, "urlscan requests per second (0 = unlimited)")
+	f.Bool("secure", false, "verify TLS certificates (default false: insecure for back-compat)")
 
-	fs.StringSlice("mc", []string{}, "list of status codes to match")
-	fs.StringSlice("fc", []string{}, "list of status codes to filter")
-	fs.StringSlice("mt", []string{}, "list of mime-types to match")
-	fs.StringSlice("ft", []string{}, "list of mime-types to filter")
-	fs.String("from", "", "fetch urls from date (format: YYYYMM)")
-	fs.String("to", "", "fetch urls to date (format: YYYYMM)")
-	fs.Bool("version", false, "show gau version")
+	f.Float64("rate-limit-wayback", DefaultRateWayback, "wayback requests per second (0 = unlimited)")
+	f.Float64("rate-limit-commoncrawl", DefaultRateCommonCrawl, "commoncrawl requests per second (0 = unlimited)")
+	f.Float64("rate-limit-otx", DefaultRateOTX, "otx requests per second (0 = unlimited)")
+	f.Float64("rate-limit-urlscan", DefaultRateURLScan, "urlscan requests per second (0 = unlimited)")
+
+	f.StringSlice("mc", nil, "list of status codes to match")
+	f.StringSlice("fc", nil, "list of status codes to filter")
+	f.StringSlice("mt", nil, "list of mime-types to match")
+	f.StringSlice("ft", nil, "list of mime-types to filter")
+	f.String("from", "", "fetch urls from date (format: YYYYMM)")
+	f.String("to", "", "fetch urls to date (format: YYYYMM)")
 }
 
-// Args returns positional arguments left after flag parsing.
-//
-// Deprecated for new code: prefer (*Options).Args(). This package-level
-// function exists for back-compat with cmd/gau/main.go and falls back to the
-// most-recently-constructed Options' args.
-func Args() []string {
-	if lastOptions == nil {
-		return nil
-	}
-	return lastOptions.args
-}
+// loadConfig builds a merged Config from defaults, optional .gau.toml file,
+// and the flags actually set on the command line. Filter flags follow a
+// special all-or-nothing rule: setting any one of them on the CLI replaces
+// the entire [filters] block from the toml.
+func loadConfig(cmd *cobra.Command, v *viper.Viper) (*Config, error) {
+	cfg := defaultConfig()
 
-// (*Options).Args returns the positional arguments parsed by this Options.
-func (o *Options) Args() []string { return o.args }
-
-// lastOptions tracks the most recent New() result so the package-level
-// Args() can find it. Tests use NewFromArgs and Options.Args directly.
-var lastOptions *Options
-
-// ReadInConfig finds and reads the .gau.toml. Missing config is non-fatal.
-func (o *Options) ReadInConfig() (*Config, error) {
-	confFile := o.viper.GetString("config")
-
-	if confFile == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return o.DefaultConfig(), err
+	configPath, _ := cmd.Flags().GetString("config")
+	if configPath == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			configPath = filepath.Join(home, ".gau.toml")
 		}
-
-		confFile = filepath.Join(home, ".gau.toml")
 	}
 
-	return o.ReadConfigFile(confFile)
+	if configPath != "" {
+		if _, statErr := os.Stat(configPath); statErr == nil {
+			v.SetConfigFile(configPath)
+			if err := v.ReadInConfig(); err != nil {
+				log.Warnf("error reading config %s: %v", configPath, err)
+			} else if err := v.Unmarshal(cfg); err != nil {
+				log.Warnf("error decoding config %s: %v", configPath, err)
+			}
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			log.Warnf("error stating config %s: %v", configPath, statErr)
+		}
+		// Missing config is non-fatal — the CLI runs on defaults + flags.
+	}
+
+	applyFlagOverrides(cmd, cfg)
+	applyFilterFlags(cmd, cfg)
+	cfg.Outfile = mustString(cmd, "o")
+	return cfg, nil
 }
 
-// ReadConfigFile reads a specific config file path.
-func (o *Options) ReadConfigFile(name string) (*Config, error) {
-	if _, err := os.Stat(name); errors.Is(err, os.ErrNotExist) {
-		return o.DefaultConfig(), fmt.Errorf("config file %s not found, using default config", name)
-	}
-
-	o.viper.SetConfigFile(name)
-
-	if err := o.viper.ReadInConfig(); err != nil {
-		return o.DefaultConfig(), err
-	}
-
-	var c Config
-
-	if err := o.viper.Unmarshal(&c); err != nil {
-		return o.DefaultConfig(), err
-	}
-
-	o.applyFlagOverrides(&c)
-
-	return &c, nil
-}
-
-// DefaultConfig returns the baseline config used when no .gau.toml exists.
-// Flag values override these defaults via applyFlagOverrides.
-func (o *Options) DefaultConfig() *Config {
-	c := &Config{
-		Filters:           providers.Filters{},
-		Proxy:             "",
-		Timeout:           45,
-		Threads:           1,
-		Verbose:           false,
-		MaxRetries:        5,
-		IncludeSubdomains: false,
-		RemoveParameters:  false,
-		Providers:         []string{"wayback", "commoncrawl", "otx", "urlscan"},
-		Blacklist:         []string{},
-		JSON:              false,
-		Outfile:           "",
-		FPCap:             output.DedupCapDefault,
+// defaultConfig is the baseline — what the user gets with no flags and no
+// .gau.toml present.
+func defaultConfig() *Config {
+	return &Config{
+		Filters:    providers.Filters{},
+		Timeout:    45,
+		Threads:    1,
+		MaxRetries: 5,
+		Providers:  []string{"wayback", "commoncrawl", "otx", "urlscan"},
+		FPCap:      output.DedupCapDefault,
 		RateLimit: RateLimitConfig{
 			Wayback:     DefaultRateWayback,
 			CommonCrawl: DefaultRateCommonCrawl,
@@ -330,132 +311,139 @@ func (o *Options) DefaultConfig() *Config {
 			URLScan:     DefaultRateURLScan,
 		},
 	}
-
-	o.applyFlagOverrides(c)
-
-	return c
 }
 
-// applyFlagOverrides copies any flag values explicitly set on the command line
-// into the merged Config, overriding both the defaults and the .gau.toml.
-func (o *Options) applyFlagOverrides(c *Config) {
-	if o.viper.GetBool("version") {
-		fmt.Printf("gau version: %s\n", providers.Version)
-		os.Exit(0)
+// applyFlagOverrides copies any flag the user explicitly set on the CLI into
+// cfg, overriding both defaults and toml. Use cmd.Flag(name).Changed to
+// distinguish "user typed it" from "default was used".
+func applyFlagOverrides(cmd *cobra.Command, cfg *Config) {
+	if isSet(cmd, "proxy") {
+		cfg.Proxy = mustString(cmd, "proxy")
+	}
+	if isSet(cmd, "threads") {
+		cfg.Threads = mustUint(cmd, "threads")
+	}
+	if isSet(cmd, "timeout") {
+		cfg.Timeout = mustUint(cmd, "timeout")
+	}
+	if isSet(cmd, "retries") {
+		cfg.MaxRetries = mustUint(cmd, "retries")
+	}
+	if isSet(cmd, "blacklist") {
+		cfg.Blacklist = mustStringSlice(cmd, "blacklist")
+	}
+	if isSet(cmd, "match-ext") {
+		cfg.MatchExtensions = mustStringSlice(cmd, "match-ext")
+	}
+	if isSet(cmd, "match-regex") {
+		cfg.MatchRegex = mustStringSlice(cmd, "match-regex")
+	}
+	if isSet(cmd, "providers") {
+		cfg.Providers = mustStringSlice(cmd, "providers")
+	}
+	if isSet(cmd, "subs") {
+		cfg.IncludeSubdomains = mustBool(cmd, "subs")
+	}
+	if isSet(cmd, "fp") {
+		cfg.RemoveParameters = mustBool(cmd, "fp")
+	}
+	if isSet(cmd, "fp-cap") {
+		cfg.FPCap = mustUint(cmd, "fp-cap")
+	}
+	if isSet(cmd, "secure") {
+		cfg.Secure = mustBool(cmd, "secure")
+	}
+	if isSet(cmd, "rate-limit-wayback") {
+		cfg.RateLimit.Wayback = mustFloat64(cmd, "rate-limit-wayback")
+	}
+	if isSet(cmd, "rate-limit-commoncrawl") {
+		cfg.RateLimit.CommonCrawl = mustFloat64(cmd, "rate-limit-commoncrawl")
+	}
+	if isSet(cmd, "rate-limit-otx") {
+		cfg.RateLimit.OTX = mustFloat64(cmd, "rate-limit-otx")
+	}
+	if isSet(cmd, "rate-limit-urlscan") {
+		cfg.RateLimit.URLScan = mustFloat64(cmd, "rate-limit-urlscan")
 	}
 
-	if v := o.viper.GetString("proxy"); v != "" {
-		c.Proxy = v
+	if isSet(cmd, "json") {
+		cfg.JSON = mustBool(cmd, "json")
 	}
-
-	if v := o.viper.GetString("o"); v != "" {
-		c.Outfile = v
+	if isSet(cmd, "verbose") {
+		cfg.Verbose = mustBool(cmd, "verbose")
 	}
-
-	// Use IsSet to distinguish explicit user override from default: pflag
-	// always provides a value, but we want the flag to win only when the
-	// user typed it.
-	if o.isFlagSet("threads") {
-		c.Threads = o.viper.GetUint("threads")
-	}
-	if o.isFlagSet("timeout") {
-		c.Timeout = o.viper.GetUint("timeout")
-	}
-	if o.isFlagSet("retries") {
-		c.MaxRetries = o.viper.GetUint("retries")
-	}
-	if o.isFlagSet("blacklist") {
-		c.Blacklist = o.viper.GetStringSlice("blacklist")
-	}
-	if o.isFlagSet("match-ext") {
-		c.MatchExtensions = o.viper.GetStringSlice("match-ext")
-	}
-	if o.isFlagSet("match-regex") {
-		c.MatchRegex = o.viper.GetStringSlice("match-regex")
-	}
-	if o.isFlagSet("providers") {
-		c.Providers = o.viper.GetStringSlice("providers")
-	}
-	if o.isFlagSet("subs") {
-		c.IncludeSubdomains = o.viper.GetBool("subs")
-	}
-	if o.isFlagSet("fp") {
-		c.RemoveParameters = o.viper.GetBool("fp")
-	}
-	if o.isFlagSet("fp-cap") {
-		c.FPCap = o.viper.GetUint("fp-cap")
-	}
-	if o.isFlagSet("secure") {
-		c.Secure = o.viper.GetBool("secure")
-	}
-	if o.isFlagSet("rate-limit-wayback") {
-		c.RateLimit.Wayback = o.viper.GetFloat64("rate-limit-wayback")
-	}
-	if o.isFlagSet("rate-limit-commoncrawl") {
-		c.RateLimit.CommonCrawl = o.viper.GetFloat64("rate-limit-commoncrawl")
-	}
-	if o.isFlagSet("rate-limit-otx") {
-		c.RateLimit.OTX = o.viper.GetFloat64("rate-limit-otx")
-	}
-	if o.isFlagSet("rate-limit-urlscan") {
-		c.RateLimit.URLScan = o.viper.GetFloat64("rate-limit-urlscan")
-	}
-
-	c.JSON = o.viper.GetBool("json")
-	c.Verbose = o.viper.GetBool("verbose")
-
-	o.applyFilterFlags(c)
 }
 
-// applyFilterFlags reads the date / status / mime filter flags and overrides
-// the toml-loaded filters when any one is set on the CLI.
-func (o *Options) applyFilterFlags(c *Config) {
-	mc := o.viper.GetStringSlice("mc")
-	fc := o.viper.GetStringSlice("fc")
-	mt := o.viper.GetStringSlice("mt")
-	ft := o.viper.GetStringSlice("ft")
-	from := o.viper.GetString("from")
-	to := o.viper.GetString("to")
+// applyFilterFlags handles the --from/--to/--mc/--fc/--mt/--ft cluster.
+// Behavior preserved from the lynxsecurity-era code: if ANY one of these is
+// set on the CLI, the entire [filters] block from the toml is replaced
+// rather than merged. Malformed --from/--to dates are silently dropped.
+func applyFilterFlags(cmd *cobra.Command, cfg *Config) {
+	mc := mustStringSlice(cmd, "mc")
+	fc := mustStringSlice(cmd, "fc")
+	mt := mustStringSlice(cmd, "mt")
+	ft := mustStringSlice(cmd, "ft")
+	from := mustString(cmd, "from")
+	to := mustString(cmd, "to")
 
-	var seen bool
+	seen := isSet(cmd, "mc") || isSet(cmd, "fc") || isSet(cmd, "mt") ||
+		isSet(cmd, "ft") || isSet(cmd, "from") || isSet(cmd, "to")
+	if !seen {
+		return
+	}
+
 	var f providers.Filters
-
 	if len(mc) > 0 {
-		seen = true
 		f.MatchStatusCodes = mc
 	}
 	if len(fc) > 0 {
-		seen = true
 		f.FilterStatusCodes = fc
 	}
 	if len(mt) > 0 {
-		seen = true
 		f.MatchMimeTypes = mt
 	}
 	if len(ft) > 0 {
-		seen = true
 		f.FilterMimeTypes = ft
 	}
 	if from != "" {
-		seen = true
 		if _, err := time.Parse("200601", from); err == nil {
 			f.From = from
 		}
 	}
 	if to != "" {
-		seen = true
 		if _, err := time.Parse("200601", to); err == nil {
 			f.To = to
 		}
 	}
-
-	if seen {
-		c.Filters = f
-	}
+	cfg.Filters = f
 }
 
-// isFlagSet reports whether the user explicitly typed --flag on the CLI.
-func (o *Options) isFlagSet(name string) bool {
-	f := o.flags.Lookup(name)
-	return f != nil && f.Changed
+// isSet reports whether the user explicitly typed --flag on the CLI.
+func isSet(cmd *cobra.Command, name string) bool {
+	fl := cmd.Flag(name)
+	return fl != nil && fl.Changed
+}
+
+// must* helpers swallow the errors that GetString/GetBool/etc. return: those
+// errors only fire if the flag isn't registered, which is a programmer bug.
+// At the call sites we know the flag exists, so the zero value is safe.
+func mustString(cmd *cobra.Command, name string) string {
+	v, _ := cmd.Flags().GetString(name)
+	return v
+}
+func mustBool(cmd *cobra.Command, name string) bool {
+	v, _ := cmd.Flags().GetBool(name)
+	return v
+}
+func mustUint(cmd *cobra.Command, name string) uint {
+	v, _ := cmd.Flags().GetUint(name)
+	return v
+}
+func mustFloat64(cmd *cobra.Command, name string) float64 {
+	v, _ := cmd.Flags().GetFloat64(name)
+	return v
+}
+func mustStringSlice(cmd *cobra.Command, name string) []string {
+	v, _ := cmd.Flags().GetStringSlice(name)
+	return v
 }
