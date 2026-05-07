@@ -12,6 +12,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const (
+	providerWayback     = "wayback"
+	providerCommonCrawl = "commoncrawl"
+	providerOTX         = "otx"
+	providerURLScan     = "urlscan"
+	extSQL              = "sql"
+	extBAK              = "bak"
+)
+
 // withConfigFile writes the given TOML to a temp file and returns its path.
 func withConfigFile(t *testing.T, body string) string {
 	t.Helper()
@@ -85,7 +94,7 @@ func TestDefaults_FPCapDefault(t *testing.T) {
 func TestDefaults_ProviderListIsAllFour(t *testing.T) {
 	cfg, _, err := runWithArgs(t)
 	require.NoError(t, err)
-	require.Equal(t, []string{"wayback", "commoncrawl", "otx", "urlscan"}, cfg.Providers)
+	require.Equal(t, []string{providerWayback, providerCommonCrawl, providerOTX, providerURLScan}, cfg.Providers)
 }
 
 // --- ProviderConfig conversion ---
@@ -118,10 +127,10 @@ func TestProviderConfig_BlacklistAlwaysContainsEmptyString(t *testing.T) {
 
 	pc, err := cfg.ProviderConfig()
 	require.NoError(t, err)
-	require.True(t, pc.Blacklist.Contains(""),
+	require.Contains(t, pc.Blacklist, "",
 		"empty string is always added so URLs without an extension don't match")
-	require.True(t, pc.Blacklist.Contains("png"))
-	require.True(t, pc.Blacklist.Contains("jpg"))
+	require.Contains(t, pc.Blacklist, "png")
+	require.Contains(t, pc.Blacklist, "jpg")
 }
 
 func TestProviderConfig_RejectsUnsupportedProxyScheme(t *testing.T) {
@@ -156,9 +165,51 @@ func TestFlagOverride_TimeoutAndRetries(t *testing.T) {
 }
 
 func TestFlagOverride_Outfile(t *testing.T) {
-	cfg, _, err := runWithArgs(t, "--o", "/tmp/out.txt")
+	cfg, _, err := runWithArgs(t, "--output", "/tmp/out.txt")
 	require.NoError(t, err)
 	require.Equal(t, "/tmp/out.txt", cfg.Outfile)
+}
+
+func TestFlagOverride_OutfileShorthand(t *testing.T) {
+	cfg, _, err := runWithArgs(t, "-o", "/tmp/out.txt")
+	require.NoError(t, err)
+	require.Equal(t, "/tmp/out.txt", cfg.Outfile,
+		"-o must continue to work as a shorthand for --output")
+}
+
+func TestFlagOverride_VerboseLong(t *testing.T) {
+	cfg, _, err := runWithArgs(t, "--verbose")
+	require.NoError(t, err)
+	require.True(t, cfg.Verbose)
+}
+
+func TestFlagOverride_VerboseShorthand(t *testing.T) {
+	cfg, _, err := runWithArgs(t, "-v")
+	require.NoError(t, err)
+	require.NotNil(t, cfg, "-v must trigger verbose, not exit early via --version")
+	require.True(t, cfg.Verbose, "-v must be a shorthand for --verbose")
+}
+
+func TestFlagOverride_ConfigShorthand(t *testing.T) {
+	// Ensures -c is wired to --config, not silently consumed by something
+	// else. We point it at a file that doesn't exist; the loader treats
+	// missing config as non-fatal so cfg still resolves.
+	cfg, _, err := runWithArgs(t, "-c", "/nonexistent/gau.toml")
+	require.NoError(t, err)
+	require.NotNil(t, cfg, "-c must be accepted as a shorthand for --config")
+}
+
+func TestFlagOverride_UserAgentsParsesCommaSeparated(t *testing.T) {
+	cfg, _, err := runWithArgs(t, "--user-agents", "Bot/A,Bot/B,Bot/C")
+	require.NoError(t, err)
+	require.Equal(t, []string{"Bot/A", "Bot/B", "Bot/C"}, cfg.UserAgents)
+}
+
+func TestFlagOverride_UserAgentsDefaultsToNil(t *testing.T) {
+	cfg, _, err := runWithArgs(t)
+	require.NoError(t, err)
+	require.Nil(t, cfg.UserAgents,
+		"unset --user-agents must leave UserAgents nil so httpclient falls back to its built-in pool")
 }
 
 func TestFlagOverride_RateLimit(t *testing.T) {
@@ -170,7 +221,7 @@ func TestFlagOverride_RateLimit(t *testing.T) {
 func TestFlagOverride_ProvidersList(t *testing.T) {
 	cfg, _, err := runWithArgs(t, "--providers", "wayback,otx")
 	require.NoError(t, err)
-	require.Equal(t, []string{"wayback", "otx"}, cfg.Providers)
+	require.Equal(t, []string{providerWayback, providerOTX}, cfg.Providers)
 }
 
 func TestFlagOverride_Blacklist(t *testing.T) {
@@ -182,7 +233,7 @@ func TestFlagOverride_Blacklist(t *testing.T) {
 func TestFlagOverride_MatchExtParses(t *testing.T) {
 	cfg, _, err := runWithArgs(t, "--match-ext", "sql,bak,tar.gz")
 	require.NoError(t, err)
-	require.Equal(t, []string{"sql", "bak", "tar.gz"}, cfg.MatchExtensions)
+	require.Equal(t, []string{extSQL, extBAK, "tar.gz"}, cfg.MatchExtensions)
 }
 
 func TestProviderConfig_MatchExtIsLowercasedAndDotStripped(t *testing.T) {
@@ -190,7 +241,7 @@ func TestProviderConfig_MatchExtIsLowercasedAndDotStripped(t *testing.T) {
 	require.NoError(t, err)
 	pc, err := cfg.ProviderConfig()
 	require.NoError(t, err)
-	require.Equal(t, []string{"sql", "bak", "zip"}, pc.MatchExtensions,
+	require.Equal(t, []string{extSQL, extBAK, "zip"}, pc.MatchExtensions,
 		"flags must normalize: lowercase, trim leading dot, trim spaces")
 }
 
@@ -228,7 +279,7 @@ func TestArgs_PositionalsForwardedToRun(t *testing.T) {
 func TestConfigFile_MissingFileFallsBackToDefaults(t *testing.T) {
 	cfg, _, err := runWithArgs(t, "--config", "/definitely/does/not/exist.toml")
 	require.NoError(t, err, "missing --config file is non-fatal")
-	require.Equal(t, []string{"wayback", "commoncrawl", "otx", "urlscan"}, cfg.Providers)
+	require.Equal(t, []string{providerWayback, providerCommonCrawl, providerOTX, providerURLScan}, cfg.Providers)
 }
 
 func TestConfigFile_ParsesCustomValues(t *testing.T) {
@@ -254,7 +305,7 @@ urlscan = 3
 	require.EqualValues(t, 7, cfg.MaxRetries)
 	require.True(t, cfg.Secure)
 	require.EqualValues(t, 50000, cfg.FPCap)
-	require.Equal(t, []string{"wayback", "otx"}, cfg.Providers)
+	require.Equal(t, []string{providerWayback, providerOTX}, cfg.Providers)
 	require.Equal(t, []string{"png", "gif"}, cfg.Blacklist)
 	require.Equal(t, 2.5, cfg.RateLimit.Wayback)
 	require.Equal(t, 0.1, cfg.RateLimit.CommonCrawl)
@@ -331,7 +382,7 @@ matchregex = ["/admin", "/api"]
 `
 	cfg, err := runWithConfigFile(t, withConfigFile(t, body))
 	require.NoError(t, err)
-	require.Equal(t, []string{"sql", "bak"}, cfg.MatchExtensions)
+	require.Equal(t, []string{extSQL, extBAK}, cfg.MatchExtensions)
 	require.Equal(t, []string{"/admin", "/api"}, cfg.MatchRegex)
 }
 

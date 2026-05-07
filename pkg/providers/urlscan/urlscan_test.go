@@ -13,6 +13,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const (
+	testDomain = "example.com"
+	testURLA   = "https://example.com/a"
+	testURLB   = "https://example.com/b"
+)
+
 func newURLScanClient(t *testing.T, srv *testutil.QueueServer, cfgFn func(*providers.Config)) *urlscan.Client {
 	cfg := testutil.NewProviderConfig(t)
 	if cfgFn != nil {
@@ -54,11 +60,11 @@ func TestURLScan_Fetch_FiltersByDomainExactMatch(t *testing.T) {
 		}`),
 	)
 	c := newURLScanClient(t, srv, nil)
-	urls, err := collectFetch(t, c, "example.com")
+	urls, err := collectFetch(t, c, testDomain)
 	require.NoError(t, err)
 	require.Equal(t, []string{
-		"https://example.com/a",
-		"https://example.com/b",
+		testURLA,
+		testURLB,
 	}, urls, "non-matching domains must be filtered")
 }
 
@@ -76,12 +82,12 @@ func TestURLScan_Fetch_SubdomainMatchWhenSubsEnabled(t *testing.T) {
 	c := newURLScanClient(t, srv, func(cfg *providers.Config) {
 		cfg.IncludeSubdomains = true
 	})
-	urls, err := collectFetch(t, c, "example.com")
+	urls, err := collectFetch(t, c, testDomain)
 	require.NoError(t, err)
 	// HasSuffix("example.com") matches both "example.com" and "blog.example.com"
 	// AND "otherexample.com" — that's a known imprecision in upstream, locked
 	// in here as current behavior. If/when we fix it, update this test.
-	require.Contains(t, urls, "https://example.com/a")
+	require.Contains(t, urls, testURLA)
 	require.Contains(t, urls, "https://blog.example.com/b")
 }
 
@@ -106,11 +112,11 @@ func TestURLScan_Fetch_PaginatesViaSearchAfter(t *testing.T) {
 		},
 	)
 	c := newURLScanClient(t, srv, nil)
-	urls, err := collectFetch(t, c, "example.com")
+	urls, err := collectFetch(t, c, testDomain)
 	require.NoError(t, err)
 	require.Equal(t, []string{
-		"https://example.com/a",
-		"https://example.com/b",
+		testURLA,
+		testURLB,
 	}, urls)
 	require.Contains(t, page2URL, "search_after=cursor-1",
 		"second page must use cursor from first page (got %q)", page2URL)
@@ -128,9 +134,9 @@ func TestURLScan_Fetch_StopsWhenSortEmpty(t *testing.T) {
 		}`),
 	)
 	c := newURLScanClient(t, srv, nil)
-	urls, err := collectFetch(t, c, "example.com")
+	urls, err := collectFetch(t, c, testDomain)
 	require.NoError(t, err)
-	require.Equal(t, []string{"https://example.com/a"}, urls)
+	require.Equal(t, []string{testURLA}, urls)
 }
 
 func TestURLScan_Fetch_429StatusInBodyStopsGracefully(t *testing.T) {
@@ -138,7 +144,7 @@ func TestURLScan_Fetch_429StatusInBodyStopsGracefully(t *testing.T) {
 		testutil.JSON(http.StatusOK, `{"status":429,"results":[],"has_more":false}`),
 	)
 	c := newURLScanClient(t, srv, nil)
-	urls, err := collectFetch(t, c, "example.com")
+	urls, err := collectFetch(t, c, testDomain)
 	require.NoError(t, err)
 	require.Empty(t, urls)
 }
@@ -146,7 +152,7 @@ func TestURLScan_Fetch_429StatusInBodyStopsGracefully(t *testing.T) {
 func TestURLScan_Fetch_429HTTPStatusStopsGracefully(t *testing.T) {
 	srv := testutil.NewQueueServer(t, testutil.Status(http.StatusTooManyRequests))
 	c := newURLScanClient(t, srv, nil)
-	urls, err := collectFetch(t, c, "example.com")
+	urls, err := collectFetch(t, c, testDomain)
 	require.NoError(t, err, "429 must be handled gracefully")
 	require.Empty(t, urls)
 }
@@ -163,7 +169,7 @@ func TestURLScan_Fetch_APIKeyHeaderForwarded(t *testing.T) {
 	c := newURLScanClient(t, srv, func(cfg *providers.Config) {
 		cfg.URLScan.APIKey = "test-key-123"
 	})
-	_, err := collectFetch(t, c, "example.com")
+	_, err := collectFetch(t, c, testDomain)
 	require.NoError(t, err)
 	require.Equal(t, "test-key-123", gotKey)
 }
@@ -171,7 +177,7 @@ func TestURLScan_Fetch_APIKeyHeaderForwarded(t *testing.T) {
 func TestURLScan_Fetch_DecodeErrorReturnsErr(t *testing.T) {
 	srv := testutil.NewQueueServer(t, testutil.JSON(http.StatusOK, `not json`))
 	c := newURLScanClient(t, srv, nil)
-	_, err := collectFetch(t, c, "example.com")
+	_, err := collectFetch(t, c, testDomain)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "decode")
 }
@@ -186,7 +192,7 @@ func TestURLScan_FormatURL_NoTrailingSlashOnHost(t *testing.T) {
 		},
 	)
 	c := newURLScanClient(t, srv, nil)
-	_, err := collectFetch(t, c, "example.com")
+	_, err := collectFetch(t, c, testDomain)
 	require.NoError(t, err)
 	require.True(t, strings.HasPrefix(seen, "/api/v1/search/"),
 		"path must be /api/v1/search/ — base URL must end with one slash, not zero or two (got %q)", seen)

@@ -1,10 +1,8 @@
 package testutil
 
 import (
-	"crypto/tls"
 	"testing"
 
-	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/mr-pmillz/gau/v2/pkg/providers"
 	"github.com/valyala/fasthttp"
 )
@@ -18,9 +16,7 @@ func NewProviderConfig(_ *testing.T) *providers.Config {
 		Threads:    1,
 		Timeout:    5,
 		MaxRetries: 0, // tests script exact responses; retries would mask bugs
-		Client: &fasthttp.Client{
-			TLSConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-		Blacklist: mapset.NewThreadUnsafeSet[string](""),
+		Client:     &fasthttp.Client{},
+		Blacklist:  map[string]struct{}{"": {}},
 	}
 }

@@ -43,7 +43,7 @@ vet: ## Run go vet
 
 .PHONY: lint
 lint: $(GOLANGCI_LINT) ## Run golangci-lint
-	$(GOLANGCI_LINT) run
+	$(GOLANGCI_LINT) run --config .golangci-lint.yml
 
 .PHONY: test
 test: cover-dir $(TPARSE) ## Run all tests with race + atomic coverage, rendered with tparse

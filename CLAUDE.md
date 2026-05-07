@@ -6,8 +6,6 @@ Guidance for Claude Code working in this repository.
 
 `gau` (getallurls) is a Go CLI that fetches known URLs for a given domain from four passive sources: the Wayback Machine, Common Crawl, AlienVault OTX, and URLScan. Output goes to stdout (or a file) as plain text or JSON.
 
-This repo is a fork of `github.com/lc/gau`. The upstream maintainer is unresponsive to issues and the design has caused real downstream problems — Common Crawl's maintainer added strict rate-limits in part because of how this tool hits their API. The fork's purpose is to fix those problems without coordinating with upstream. Do **not** open PRs against `lc/gau` and do **not** add upstream as a remote. The module path is `github.com/mr-pmillz/gau/v2` and all internal imports must use that path.
-
 ## Repo Layout
 
 ```

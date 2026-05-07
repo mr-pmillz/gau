@@ -1,30 +1,102 @@
+project_name: gau
 version: 2
+
+# Configures the release process on GitHub
+# https://goreleaser.com/customization/release/
+release:
+  github:
+    owner: mr-pmillz
+    name: gau
+  include_meta: true
+
+env:
+  - GO111MODULE=on
+  - GITHUB_TOKEN={{ .Env.GITHUB_TOKEN }}
 before:
   hooks:
-    - go mod download
+    # You may remove this if you don't use go modules.
+    - go mod tidy
 builds:
-  - binary: gau
+  - env: [CGO_ENABLED=0]
+    id: gau
+    main: ./cmd/gau
+    binary: gau
+    flags:
+      - -trimpath
+    asmflags:
+      - all=-trimpath={{.Env.GOPATH}}
+    gcflags:
+      - all=-trimpath={{.Env.GOPATH}}
+    ldflags: |
+      -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{ .CommitDate }}
     goos:
       - linux
-      - windows
-      - darwin
     goarch:
       - amd64
-      - 386
-      - arm64
-    ignore:
-      - goos: darwin
-        goarch: 386
-      - goos: windows
-        goarch: 'arm64'
-    main: ./cmd/gau/
+    # ensures mod timestamp to be the commit timestamp
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+
 archives:
   - id: tgz
-    format: tar.gz
-    format_overrides:
-        - goos: windows
-          format: zip
 
-signs:
-  - artifacts: checksum
-    args: [ "--batch", "-u", "{{ .Env.GPG_FINGERPRINT }}", "--output", "${signature}", "--detach-sign", "${artifact}" ]
+# Configures the checksum file generation
+# https://goreleaser.com/customization/checksum/
+checksum:
+  name_template: 'checksums.txt'
+
+# Change the digests filename for attestation
+# https://goreleaser.com/customization/attestations/?h=docker_digest
+docker_digest:
+  name_template: "digests.txt"
+
+# Creates a source code archive (tar.gz and zip)
+# https://goreleaser.com/customization/source/
+source:
+  enabled: true
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: "Bug fixes"
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: "Performance"
+      regexp: '^.*?perf(\([[:word:]]+\))??!?:.+$'
+      order: 2
+
+# Creates Docker images and pushes them to registries using Docker v2 API
+# https://goreleaser.com/customization/docker/
+dockers_v2:
+  - images:
+      - "ghcr.io/mr-pmillz/{{ .ProjectName }}"
+    tags:
+      - "v{{ .Version }}"
+      - "latest"
+    dockerfile: goreleaser.dockerfile
+    extra_files:
+      - entrypoint.sh
+    platforms:
+      - linux/amd64
+    annotations:
+      "org.opencontainers.image.description": "GAU Get All URLs from wayback machine, alien vault, urlscan, and commoncrawl"
+      "org.opencontainers.image.created": "{{.Date}}"
+      "org.opencontainers.image.name": "{{.ProjectName}}"
+      "org.opencontainers.image.revision": "{{.FullCommit}}"
+      "org.opencontainers.image.version": "{{.Version}}"
+      "org.opencontainers.image.source": "{{.GitURL}}"
+    labels:
+      "org.opencontainers.image.description": "GAU Get All URLs from wayback machine, alien vault, urlscan, and commoncrawl"
+      "org.opencontainers.image.created": "{{.Date}}"
+      "org.opencontainers.image.name": "{{.ProjectName}}"
+      "org.opencontainers.image.revision": "{{.FullCommit}}"
+      "org.opencontainers.image.version": "{{.Version}}"
+      "org.opencontainers.image.source": "{{.GitURL}}"

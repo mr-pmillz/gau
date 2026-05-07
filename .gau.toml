@@ -17,6 +17,15 @@ blacklist = ["ttf","woff","svg","png","jpg"]
 # matchregex = ["/admin", "\\.php$"]
 json = false
 
+# useragents: optionally override the built-in User-Agent pool. Empty/unset
+# means use gau's built-in list (current Chrome/Firefox/Safari/Edge). Set
+# this if a specific UA gets blocked by a provider; one is picked at random
+# per request.
+# useragents = [
+#   "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
+#   "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+# ]
+
 # secure = true enables TLS verification. Default (false) preserves the
 # historical insecure-by-default behavior so existing users aren't broken;
 # set to true if your network path doesn't terminate TLS for you.
@@ -35,7 +44,7 @@ fpcap = 1000000
 # this tool historically; please keep its rate low.
 [ratelimit]
   wayback = 1.0
-  commoncrawl = 0.5
+  commoncrawl = 0.2  # one request every 5 seconds — CC is highly sensitive
   otx = 5.0
   urlscan = 2.0
 

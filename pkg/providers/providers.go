@@ -4,7 +4,6 @@ import (
 	"context"
 	"regexp"
 
-	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/valyala/fasthttp"
 	"golang.org/x/time/rate"
 )
@@ -54,7 +53,7 @@ type Config struct {
 	RemoveParameters  bool
 	Client            *fasthttp.Client
 	Providers         []string
-	Blacklist         mapset.Set[string]
+	Blacklist         map[string]struct{}
 	Output            string
 	JSON              bool
 	URLScan           URLScan

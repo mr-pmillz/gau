@@ -12,6 +12,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const (
+	providerWayback = "wayback"
+	providerOTX     = "otx"
+	providerURLScan = "urlscan"
+	testDomain      = "example.com"
+	testURLA        = "https://example.com/a"
+)
+
 // fakeProvider is a controllable provider for runner tests.
 type fakeProvider struct {
 	name   string
@@ -41,7 +49,7 @@ func (p *fakeProvider) Fetch(ctx context.Context, _ string, results chan string)
 func TestRunner_Init_RegistersKnownProviders(t *testing.T) {
 	cfg := testutil.NewProviderConfig(t)
 	r := &runner.Runner{}
-	err := r.Init(context.Background(), cfg, []string{"wayback", "otx", "urlscan"}, providers.Filters{})
+	err := r.Init(context.Background(), cfg, []string{providerWayback, providerOTX, providerURLScan}, providers.Filters{})
 	require.NoError(t, err)
 	require.Len(t, r.Providers, 3)
 }
@@ -49,7 +57,7 @@ func TestRunner_Init_RegistersKnownProviders(t *testing.T) {
 func TestRunner_Init_SkipsUnknownProvider(t *testing.T) {
 	cfg := testutil.NewProviderConfig(t)
 	r := &runner.Runner{}
-	err := r.Init(context.Background(), cfg, []string{"wayback", "made-up", "urlscan"}, providers.Filters{})
+	err := r.Init(context.Background(), cfg, []string{providerWayback, "made-up", providerURLScan}, providers.Filters{})
 	require.NoError(t, err)
 	require.Len(t, r.Providers, 2, "unknown provider names must be silently skipped")
 }
@@ -58,9 +66,9 @@ func TestRunner_StartSpawnsThreadsWorkers(t *testing.T) {
 	cfg := testutil.NewProviderConfig(t)
 	cfg.Threads = 3
 	r := &runner.Runner{}
-	require.NoError(t, r.Init(context.Background(), cfg, []string{"wayback"}, providers.Filters{}))
+	require.NoError(t, r.Init(context.Background(), cfg, []string{providerWayback}, providers.Filters{}))
 
-	provider := &fakeProvider{name: "fake", urls: []string{"https://example.com/a"}}
+	provider := &fakeProvider{name: "fake", urls: []string{testURLA}}
 	r.Providers = []providers.Provider{provider}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -72,7 +80,7 @@ func TestRunner_StartSpawnsThreadsWorkers(t *testing.T) {
 
 	// Submit one item per worker.
 	for i := 0; i < 3; i++ {
-		work <- runner.NewWork("example.com", provider)
+		work <- runner.NewWork(testDomain, provider)
 	}
 	close(work)
 	r.Wait()
@@ -102,8 +110,8 @@ func TestRunner_ContextCancellationStopsWorkers(t *testing.T) {
 
 	r.Start(ctx, work, results)
 
-	work <- runner.NewWork("example.com", provider)
-	work <- runner.NewWork("example.com", provider)
+	work <- runner.NewWork(testDomain, provider)
+	work <- runner.NewWork(testDomain, provider)
 
 	time.Sleep(50 * time.Millisecond)
 	cancel()
@@ -129,7 +137,7 @@ func TestRunner_OneProviderErrorDoesNotKillRun(t *testing.T) {
 	r := &runner.Runner{}
 	require.NoError(t, r.Init(context.Background(), cfg, []string{}, providers.Filters{}))
 
-	good := &fakeProvider{name: "good", urls: []string{"https://example.com/a"}}
+	good := &fakeProvider{name: "good", urls: []string{testURLA}}
 	bad := &errProvider{name: "bad"}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -138,8 +146,8 @@ func TestRunner_OneProviderErrorDoesNotKillRun(t *testing.T) {
 	results := make(chan string, 4)
 
 	r.Start(ctx, work, results)
-	work <- runner.NewWork("example.com", bad)
-	work <- runner.NewWork("example.com", good)
+	work <- runner.NewWork(testDomain, bad)
+	work <- runner.NewWork(testDomain, good)
 	close(work)
 
 	var wg sync.WaitGroup
@@ -156,7 +164,7 @@ func TestRunner_OneProviderErrorDoesNotKillRun(t *testing.T) {
 	close(results)
 	wg.Wait()
 
-	require.Equal(t, []string{"https://example.com/a"}, got,
+	require.Equal(t, []string{testURLA}, got,
 		"good provider must still produce results even after bad one errors")
 }
 

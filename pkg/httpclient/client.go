@@ -52,6 +52,11 @@ var (
 	backoffMax  = 30 * time.Second
 )
 
+const (
+	maxTimeoutDuration time.Duration = 1<<63 - 1
+	maxTimeoutSeconds                = int64(maxTimeoutDuration / time.Second)
+)
+
 // MakeRequest performs a GET against url, observing ctx, the rate limiter,
 // and a jittered exponential backoff retry policy. It is the only HTTP entry
 // point used by providers.
@@ -195,7 +200,7 @@ func doOnce(ctx context.Context, c *fasthttp.Client, url string, timeoutSec uint
 
 		var err error
 		if timeoutSec > 0 {
-			deadline := time.Now().Add(time.Duration(timeoutSec) * time.Second)
+			deadline := time.Now().Add(timeoutDuration(timeoutSec))
 			if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
 				deadline = dl
 			}
@@ -219,6 +224,14 @@ func doOnce(ctx context.Context, c *fasthttp.Client, url string, timeoutSec uint
 	case r := <-ch:
 		return r.body, r.err
 	}
+}
+
+func timeoutDuration(timeoutSec uint) time.Duration {
+	seconds, err := strconv.ParseInt(strconv.FormatUint(uint64(timeoutSec), 10), 10, 64)
+	if err != nil || seconds > maxTimeoutSeconds {
+		return maxTimeoutDuration
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 // classifyResponse maps an HTTP status code to a sentinel error or returns
@@ -268,20 +281,75 @@ func parseRetryAfter(v string) (time.Duration, error) {
 	return 0, fmt.Errorf("could not parse Retry-After: %q", v)
 }
 
-// userAgents is a small modern set; rotated per request via crypto/rand.
-var userAgents = []string{
-	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-	"Mozilla/5.0 (Macintosh; Intel Mac OS X 14_2) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
-	"Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0",
-	"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
-	"Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
-	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0",
+// defaultUserAgents is the package's built-in pool. CommonCrawl (and other
+// passive sources) silently drop connections from non-browser User-Agents,
+// so this list deliberately tracks current stable Chrome / Firefox / Safari
+// / Edge strings rather than synthetic identifiers like "gau/2.0".
+//
+// If any specific UA in this list gets blocked by a provider, end users
+// can override the entire pool via the --user-agents CLI flag (or the
+// useragents key in .gau.toml) without rebuilding.
+//
+// Reference: https://www.whatismybrowser.com/guides/the-latest-user-agent/
+var defaultUserAgents = []string{
+	// Chrome — Windows
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+	// Chrome — macOS
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+	// Chrome — Linux
+	"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+	// Firefox — Linux / Windows / macOS
+	"Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 14.5; rv:128.0) Gecko/20100101 Firefox/128.0",
+	// Safari — macOS
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+	// Edge — Windows
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36 Edg/134.0.0.0",
+}
+
+// userAgents holds the active UA pool, rotated per request via crypto/rand.
+// Initialized to defaultUserAgents; replaced by SetUserAgents.
+var userAgents = defaultUserAgents
+
+// SetUserAgents replaces the package-wide UA pool. Empty / nil input is
+// treated as "reset to defaults" so users can clear a custom pool without
+// rebuilding. Intended to be called once at startup, before any worker
+// goroutines spawn — concurrent reads of the slice are safe, but a Set
+// during in-flight requests is not synchronized.
+func SetUserAgents(uas []string) {
+	cleaned := make([]string, 0, len(uas))
+	for _, ua := range uas {
+		if ua == "" {
+			continue
+		}
+		cleaned = append(cleaned, ua)
+	}
+	if len(cleaned) == 0 {
+		userAgents = defaultUserAgents
+		return
+	}
+	userAgents = cleaned
+}
+
+// DefaultUserAgents returns a copy of the built-in UA pool. Useful for
+// library consumers that want to inspect or extend the defaults.
+func DefaultUserAgents() []string {
+	out := make([]string, len(defaultUserAgents))
+	copy(out, defaultUserAgents)
+	return out
 }
 
 func randomUserAgent() string {
-	n, err := rand.Int(rand.Reader, big.NewInt(int64(len(userAgents))))
-	if err != nil {
-		return userAgents[0]
+	pool := userAgents
+	if len(pool) == 0 {
+		pool = defaultUserAgents
 	}
-	return userAgents[n.Int64()]
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(len(pool))))
+	if err != nil {
+		return pool[0]
+	}
+	return pool[n.Int64()]
 }

@@ -20,7 +20,6 @@ import (
 	"strings"
 	"time"
 
-	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/mr-pmillz/gau/v2/pkg/output"
 	"github.com/mr-pmillz/gau/v2/pkg/providers"
 	log "github.com/sirupsen/logrus"
@@ -50,7 +49,7 @@ type RateLimitConfig struct {
 // the most important fix in this fork.
 const (
 	DefaultRateWayback     = 1.0
-	DefaultRateCommonCrawl = 0.5
+	DefaultRateCommonCrawl = 0.2 // one request every 5 seconds — CC is highly sensitive to bursty traffic
 	DefaultRateOTX         = 5.0
 	DefaultRateURLScan     = 2.0
 )
@@ -75,7 +74,8 @@ type Config struct {
 	Secure            bool              `mapstructure:"secure"`
 	FPCap             uint              `mapstructure:"fpcap"`
 	RateLimit         RateLimitConfig   `mapstructure:"ratelimit"`
-	Outfile           string            // populated from --o flag
+	UserAgents        []string          `mapstructure:"useragents"`
+	Outfile           string            // populated from --output / -o flag
 }
 
 // ProviderConfig builds the *providers.Config that the runner consumes.
@@ -113,7 +113,7 @@ func (c *Config) ProviderConfig() (*providers.Config, error) {
 			TLSConfig: &tls.Config{
 				// Default insecure preserves historical behavior; --secure
 				// flips this. See README for the security tradeoff.
-				InsecureSkipVerify: !c.Secure,
+				InsecureSkipVerify: !c.Secure, //nolint:gosec // Documented legacy default; --secure enables verification.
 			},
 			Dial: dialer,
 		},
@@ -141,8 +141,11 @@ func (c *Config) ProviderConfig() (*providers.Config, error) {
 	if c.Verbose {
 		log.SetLevel(log.InfoLevel)
 	}
-	pc.Blacklist = mapset.NewThreadUnsafeSet(c.Blacklist...)
-	pc.Blacklist.Add("")
+	pc.Blacklist = make(map[string]struct{}, len(c.Blacklist)+1)
+	for _, ext := range c.Blacklist {
+		pc.Blacklist[ext] = struct{}{}
+	}
+	pc.Blacklist[""] = struct{}{} // URLs with no extension are never blacklisted
 	return pc, nil
 }
 
@@ -229,8 +232,8 @@ func NewRootCmd(run RunFunc) *cobra.Command {
 func registerFlags(cmd *cobra.Command) {
 	f := cmd.Flags()
 
-	f.String("o", "", "filename to write results to")
-	f.String("config", "", "location of config file (default $HOME/.gau.toml or %USERPROFILE%\\.gau.toml)")
+	f.StringP("output", "o", "", "filename to write results to")
+	f.StringP("config", "c", "", "location of config file (default $HOME/.gau.toml or %USERPROFILE%\\.gau.toml)")
 	f.Uint("threads", 1, "number of workers to spawn")
 	f.Uint("timeout", 45, "timeout (in seconds) for HTTP client")
 	f.Uint("retries", 0, "retries for HTTP client")
@@ -242,8 +245,9 @@ func registerFlags(cmd *cobra.Command) {
 	f.Bool("subs", false, "include subdomains of target domain")
 	f.Bool("fp", false, "remove different parameters of the same endpoint")
 	f.Uint("fp-cap", output.DedupCapDefault, "max --fp dedup entries (0 = unbounded; uses LRU eviction when exceeded)")
-	f.Bool("verbose", false, "show verbose output")
+	f.BoolP("verbose", "v", false, "show verbose output")
 	f.Bool("json", false, "output as json")
+	f.StringSlice("user-agents", nil, "override the built-in User-Agent pool (comma-separated; one will be picked at random per request)")
 
 	f.Bool("secure", false, "verify TLS certificates (default false: insecure for back-compat)")
 
@@ -290,7 +294,7 @@ func loadConfig(cmd *cobra.Command, v *viper.Viper) (*Config, error) {
 
 	applyFlagOverrides(cmd, cfg)
 	applyFilterFlags(cmd, cfg)
-	cfg.Outfile = mustString(cmd, "o")
+	cfg.Outfile = mustString(cmd, "output")
 	return cfg, nil
 }
 
@@ -371,6 +375,9 @@ func applyFlagOverrides(cmd *cobra.Command, cfg *Config) {
 	}
 	if isSet(cmd, "verbose") {
 		cfg.Verbose = mustBool(cmd, "verbose")
+	}
+	if isSet(cmd, "user-agents") {
+		cfg.UserAgents = mustStringSlice(cmd, "user-agents")
 	}
 }
 

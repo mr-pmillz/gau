@@ -20,6 +20,8 @@ const (
 	defaultBaseURL = "https://urlscan.io/"
 )
 
+var errURLScanStop = errors.New("stop urlscan fetch")
+
 var _ providers.Provider = (*Client)(nil)
 
 // Client implements providers.Provider against urlscan.io.
@@ -54,76 +56,131 @@ func (c *Client) SetBaseURL(u string) { c.baseURL = ensureTrailingSlash(u) }
 func (c *Client) Name() string { return Name }
 
 func (c *Client) Fetch(ctx context.Context, domain string, results chan string) error {
-	var searchAfter string
-	var header httpclient.Header
-	if c.config.URLScan.APIKey != "" {
-		header.Key = "API-Key"
-		header.Value = c.config.URLScan.APIKey
-	}
+	header := c.authHeader()
+	searchAfter := ""
 
 	for page := uint(0); ; page++ {
 		if err := ctx.Err(); err != nil {
 			return nil
 		}
 
-		logrus.WithFields(logrus.Fields{"provider": Name, "page": page}).Infof("fetching %s", domain)
-		apiURL := c.formatURL(domain, searchAfter)
-		resp, err := httpclient.MakeRequest(ctx, c.config.Client, apiURL,
-			httpclient.RequestOpts{
-				MaxRetries: c.config.MaxRetries,
-				Timeout:    c.config.Timeout,
-				Limiter:    c.limiter,
-			}, header)
-		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return nil
-			}
-			// urlscan rate-limits aggressively. The httpclient surfaces
-			// this as ErrRateLimited; treat it as a graceful stop, not a
-			// hard error, matching prior behavior so the user gets the
-			// URLs we did manage to collect.
-			if errors.Is(err, httpclient.ErrRateLimited) {
-				logrus.WithField("provider", Name).Warn("urlscan returned 429, stopping")
-				return nil
-			}
-			return fmt.Errorf("fetch urlscan: %w", err)
-		}
-
-		var result apiResponse
-		decoder := jsoniter.NewDecoder(bytes.NewReader(resp))
-		decoder.UseNumber()
-		if err = decoder.Decode(&result); err != nil {
-			return fmt.Errorf("decode urlscan: %w", err)
-		}
-		// Some urlscan endpoints embed status inside the body even on 200.
-		if result.Status == 429 {
-			logrus.WithField("provider", Name).Warn("urlscan body indicated 429, stopping")
+		result, err := c.fetchPage(ctx, domain, searchAfter, page, header)
+		if errors.Is(err, errURLScanStop) {
 			return nil
 		}
+		if err != nil {
+			return err
+		}
 
-		total := len(result.Results)
-		for i, res := range result.Results {
-			if res.Page.Domain == domain ||
-				(c.config.IncludeSubdomains && strings.HasSuffix(res.Page.Domain, domain)) {
-				select {
-				case <-ctx.Done():
-					return nil
-				case results <- res.Page.URL:
-				}
-			}
-			if i == total-1 {
-				sortParam := parseSort(res.Sort)
-				if sortParam == "" {
-					return nil
-				}
-				searchAfter = sortParam
-			}
+		if err := c.emitMatchingURLs(ctx, domain, result.Results, results); err != nil {
+			return nil
 		}
 
 		if !result.HasMore {
 			return nil
 		}
+
+		searchAfter = nextSearchAfter(result.Results)
+		if searchAfter == "" {
+			return nil
+		}
 	}
+}
+
+func (c *Client) authHeader() httpclient.Header {
+	if c.config.URLScan.APIKey == "" {
+		return httpclient.Header{}
+	}
+	return httpclient.Header{Key: "API-Key", Value: c.config.URLScan.APIKey}
+}
+
+func (c *Client) fetchPage(
+	ctx context.Context,
+	domain string,
+	searchAfter string,
+	page uint,
+	header httpclient.Header,
+) (apiResponse, error) {
+	logrus.WithFields(logrus.Fields{"provider": Name, "page": page}).Infof("fetching %s", domain)
+	resp, err := httpclient.MakeRequest(ctx, c.config.Client, c.formatURL(domain, searchAfter),
+		httpclient.RequestOpts{
+			MaxRetries: c.config.MaxRetries,
+			Timeout:    c.config.Timeout,
+			Limiter:    c.limiter,
+		}, header)
+	if err != nil {
+		return apiResponse{}, handleRequestError(err)
+	}
+
+	result, err := decodeResponse(resp)
+	if err != nil {
+		return apiResponse{}, err
+	}
+	if result.Status == 429 {
+		logrus.WithField("provider", Name).Warn("urlscan body indicated 429, stopping")
+		return apiResponse{}, errURLScanStop
+	}
+	return result, nil
+}
+
+func handleRequestError(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return errURLScanStop
+	}
+	// urlscan rate-limits aggressively. Treat 429 as a graceful stop so the
+	// user still gets URLs already collected.
+	if errors.Is(err, httpclient.ErrRateLimited) {
+		logrus.WithField("provider", Name).Warn("urlscan returned 429, stopping")
+		return errURLScanStop
+	}
+	return fmt.Errorf("fetch urlscan: %w", err)
+}
+
+func decodeResponse(resp []byte) (apiResponse, error) {
+	var result apiResponse
+	decoder := jsoniter.NewDecoder(bytes.NewReader(resp))
+	decoder.UseNumber()
+	if err := decoder.Decode(&result); err != nil {
+		return apiResponse{}, fmt.Errorf("decode urlscan: %w", err)
+	}
+	return result, nil
+}
+
+func (c *Client) emitMatchingURLs(
+	ctx context.Context,
+	domain string,
+	searchResults []searchResult,
+	results chan string,
+) error {
+	for _, res := range searchResults {
+		if !c.matchesDomain(res.Page.Domain, domain) {
+			continue
+		}
+		if err := emitResult(ctx, results, res.Page.URL); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Client) matchesDomain(candidate string, domain string) bool {
+	return candidate == domain || (c.config.IncludeSubdomains && strings.HasSuffix(candidate, domain))
+}
+
+func emitResult(ctx context.Context, results chan string, url string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case results <- url:
+		return nil
+	}
+}
+
+func nextSearchAfter(results []searchResult) string {
+	if len(results) == 0 {
+		return ""
+	}
+	return parseSort(results[len(results)-1].Sort)
 }
 
 func (c *Client) formatURL(domain string, after string) string {

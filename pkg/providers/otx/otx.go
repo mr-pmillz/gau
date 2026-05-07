@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/bobesa/go-domain-util/domainutil"
 	jsoniter "github.com/json-iterator/go"
 	"github.com/mr-pmillz/gau/v2/pkg/httpclient"
 	"github.com/mr-pmillz/gau/v2/pkg/providers"
@@ -111,11 +110,11 @@ func (c *Client) Fetch(ctx context.Context, domain string, results chan string) 
 // subdomain and whether --subs is enabled.
 func (c *Client) formatURL(domain string, page uint) string {
 	category := "hostname"
-	if !domainutil.HasSubdomain(domain) {
+	if !providers.HasSubdomain(domain) {
 		category = "domain"
 	}
-	if domainutil.HasSubdomain(domain) && c.config.IncludeSubdomains {
-		domain = domainutil.Domain(domain)
+	if providers.HasSubdomain(domain) && c.config.IncludeSubdomains {
+		domain = providers.Domain(domain)
 		category = "domain"
 	}
 	return fmt.Sprintf("%sapi/v1/indicators/%s/%s/url_list?limit=100&page=%d", c.baseURL, category, domain, page)

@@ -12,7 +12,6 @@ import (
 	"regexp"
 	"strings"
 
-	mapset "github.com/deckarep/golang-set/v2"
 	jsoniter "github.com/json-iterator/go"
 	"github.com/valyala/bytebufferpool"
 )
@@ -37,7 +36,7 @@ type WriteOptions struct {
 	// Blacklist excludes URLs whose path extension (case-insensitive) is
 	// in this set. The empty string is always added so URLs with no
 	// extension are not blacklisted.
-	Blacklist mapset.Set[string]
+	Blacklist map[string]struct{}
 
 	// MatchExtensions, when non-empty, restricts emission to URLs whose
 	// path ends in (`.` + one of) these entries. Lowercased. Compound
@@ -161,7 +160,7 @@ func matchesAnyRegex(rawURL string, patterns []*regexp.Regexp) bool {
 // isBlacklisted returns true when the URL's path extension is in the
 // blacklist. Extension matching is case-insensitive and excludes the
 // leading dot. URLs without an extension are never blacklisted.
-func isBlacklisted(u *url.URL, blacklist mapset.Set[string]) bool {
+func isBlacklisted(u *url.URL, blacklist map[string]struct{}) bool {
 	if blacklist == nil {
 		return false
 	}
@@ -169,7 +168,8 @@ func isBlacklisted(u *url.URL, blacklist mapset.Set[string]) bool {
 	if ext == "" {
 		return false
 	}
-	return blacklist.Contains(ext)
+	_, ok := blacklist[ext]
+	return ok
 }
 
 // lru is a string-keyed LRU set. lru.cap == 0 means unbounded.

@@ -8,6 +8,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/mr-pmillz/gau/v2/pkg/httpclient"
 	"github.com/mr-pmillz/gau/v2/pkg/output"
 	"github.com/mr-pmillz/gau/v2/runner"
 	"github.com/mr-pmillz/gau/v2/runner/flags"
@@ -27,6 +28,11 @@ func main() {
 // runGau is the cobra RunE callback: it owns the actual fetch pipeline.
 // Returning an error here makes cobra print it and Execute return non-nil.
 func runGau(cfg *flags.Config, domains []string) error {
+	// Apply a custom UA pool before any provider spins up. Empty/nil resets
+	// to defaults; safe to call unconditionally because SetUserAgents
+	// handles both cases.
+	httpclient.SetUserAgents(cfg.UserAgents)
+
 	pcfg, err := cfg.ProviderConfig()
 	if err != nil {
 		return err

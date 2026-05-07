@@ -6,16 +6,23 @@ import (
 	"strings"
 	"testing"
 
-	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/mr-pmillz/gau/v2/pkg/output"
 	"github.com/stretchr/testify/require"
+)
+
+const (
+	testURLA = "https://example.com/a"
+	testURLB = "https://example.com/b"
+	extPNG   = "png"
+	extSQL   = "sql"
+	extBAK   = "bak"
 )
 
 // defaultOpts builds a WriteOptions that does no filtering — every test
 // then mutates only the fields it cares about.
 func defaultOpts() output.WriteOptions {
 	return output.WriteOptions{
-		Blacklist: mapset.NewThreadUnsafeSet[string](""),
+		Blacklist: map[string]struct{}{"": {}},
 	}
 }
 
@@ -34,8 +41,8 @@ func pumpWrite(t *testing.T, opts output.WriteOptions) (*bytes.Buffer, chan stri
 
 func TestWriteURLs_PassesThroughURLs(t *testing.T) {
 	buf, ch, done := pumpWrite(t, defaultOpts())
-	ch <- "https://example.com/a"
-	ch <- "https://example.com/b"
+	ch <- testURLA
+	ch <- testURLB
 	close(ch)
 	require.NoError(t, <-done)
 	require.Equal(t, "https://example.com/a\nhttps://example.com/b\n", buf.String())
@@ -43,7 +50,7 @@ func TestWriteURLs_PassesThroughURLs(t *testing.T) {
 
 func TestWriteURLs_BlacklistFiltersByExtension(t *testing.T) {
 	opts := defaultOpts()
-	opts.Blacklist = mapset.NewThreadUnsafeSet[string]("png", "jpg", "")
+	opts.Blacklist = map[string]struct{}{extPNG: {}, "jpg": {}, "": {}}
 	buf, ch, done := pumpWrite(t, opts)
 	ch <- "https://example.com/keep.html"
 	ch <- "https://example.com/skip.png"
@@ -60,7 +67,7 @@ func TestWriteURLs_BlacklistFiltersByExtension(t *testing.T) {
 
 func TestWriteURLs_BlacklistIsCaseInsensitive(t *testing.T) {
 	opts := defaultOpts()
-	opts.Blacklist = mapset.NewThreadUnsafeSet[string]("png", "")
+	opts.Blacklist = map[string]struct{}{extPNG: {}, "": {}}
 	buf, ch, done := pumpWrite(t, opts)
 	ch <- "https://example.com/upper.PNG"
 	ch <- "https://example.com/mixed.PnG"
@@ -72,7 +79,7 @@ func TestWriteURLs_BlacklistIsCaseInsensitive(t *testing.T) {
 
 func TestWriteURLs_BlacklistEntriesHaveNoLeadingDot(t *testing.T) {
 	opts := defaultOpts()
-	opts.Blacklist = mapset.NewThreadUnsafeSet[string]("png", "")
+	opts.Blacklist = map[string]struct{}{extPNG: {}, "": {}}
 	buf, ch, done := pumpWrite(t, opts)
 	ch <- "https://example.com/x.png"
 	close(ch)
@@ -82,7 +89,7 @@ func TestWriteURLs_BlacklistEntriesHaveNoLeadingDot(t *testing.T) {
 
 func TestWriteURLs_QueryStringDoesNotInflateExt(t *testing.T) {
 	opts := defaultOpts()
-	opts.Blacklist = mapset.NewThreadUnsafeSet[string]("png", "")
+	opts.Blacklist = map[string]struct{}{extPNG: {}, "": {}}
 	buf, ch, done := pumpWrite(t, opts)
 	ch <- "https://example.com/file.png?width=200"
 	ch <- "https://example.com/page.html?download=foo.png"
@@ -131,20 +138,20 @@ func TestWriteURLs_FPCapEvictsLRU(t *testing.T) {
 	opts.RemoveParameters = true
 	opts.DedupCap = 2
 	buf, ch, done := pumpWrite(t, opts)
-	ch <- "https://example.com/a"
-	ch <- "https://example.com/b"
+	ch <- testURLA
+	ch <- testURLB
 	ch <- "https://example.com/c"
-	ch <- "https://example.com/a"
-	ch <- "https://example.com/b"
+	ch <- testURLA
+	ch <- testURLB
 	close(ch)
 	require.NoError(t, <-done)
 	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
 	require.Equal(t, []string{
-		"https://example.com/a",
-		"https://example.com/b",
+		testURLA,
+		testURLB,
 		"https://example.com/c",
-		"https://example.com/a",
-		"https://example.com/b",
+		testURLA,
+		testURLB,
 	}, lines)
 }
 
@@ -160,8 +167,8 @@ func TestWriteURLs_FPCapTouchKeepsRecentInLRU(t *testing.T) {
 	opts.RemoveParameters = true
 	opts.DedupCap = 2
 	buf, ch, done := pumpWrite(t, opts)
-	ch <- "https://example.com/a"
-	ch <- "https://example.com/b"
+	ch <- testURLA
+	ch <- testURLB
 	ch <- "https://example.com/a?dup=1"
 	ch <- "https://example.com/c"
 	ch <- "https://example.com/a?dup=2"
@@ -169,8 +176,8 @@ func TestWriteURLs_FPCapTouchKeepsRecentInLRU(t *testing.T) {
 	require.NoError(t, <-done)
 	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
 	require.Equal(t, []string{
-		"https://example.com/a",
-		"https://example.com/b",
+		testURLA,
+		testURLB,
 		"https://example.com/c",
 	}, lines)
 }
@@ -181,7 +188,7 @@ func TestWriteURLs_FPCapZeroIsUnbounded(t *testing.T) {
 	opts.DedupCap = 0
 	buf, ch, done := pumpWrite(t, opts)
 	for i := 0; i < 10; i++ {
-		ch <- "https://example.com/a"
+		ch <- testURLA
 	}
 	close(ch)
 	require.NoError(t, <-done)
@@ -192,7 +199,7 @@ func TestWriteURLs_FPCapZeroIsUnbounded(t *testing.T) {
 func TestWriteURLs_PropagatesWriteError(t *testing.T) {
 	w := &errOnceWriter{}
 	ch := make(chan string, 4)
-	ch <- "https://example.com/a"
+	ch <- testURLA
 	close(ch)
 	err := output.WriteURLs(w, ch, defaultOpts())
 	require.Error(t, err)
@@ -215,7 +222,7 @@ func (e stubError) Error() string { return string(e) }
 
 func TestWriteURLs_MatchExtAllowsOnlyMatching(t *testing.T) {
 	opts := defaultOpts()
-	opts.MatchExtensions = []string{"sql", "bak", "zip"}
+	opts.MatchExtensions = []string{extSQL, extBAK, "zip"}
 	buf, ch, done := pumpWrite(t, opts)
 	ch <- "https://example.com/dump.sql"
 	ch <- "https://example.com/db.bak"
@@ -234,7 +241,7 @@ func TestWriteURLs_MatchExtAllowsOnlyMatching(t *testing.T) {
 
 func TestWriteURLs_MatchExtIsCaseInsensitive(t *testing.T) {
 	opts := defaultOpts()
-	opts.MatchExtensions = []string{"sql"}
+	opts.MatchExtensions = []string{extSQL}
 	buf, ch, done := pumpWrite(t, opts)
 	ch <- "https://example.com/DUMP.SQL"
 	ch <- "https://example.com/dump.sql"
@@ -261,7 +268,7 @@ func TestWriteURLs_MatchExtEmptyMeansNoFilter(t *testing.T) {
 	opts := defaultOpts()
 	opts.MatchExtensions = nil
 	buf, ch, done := pumpWrite(t, opts)
-	ch <- "https://example.com/a"
+	ch <- testURLA
 	ch <- "https://example.com/b.html"
 	close(ch)
 	require.NoError(t, <-done)
@@ -272,8 +279,8 @@ func TestWriteURLs_MatchExtEmptyMeansNoFilter(t *testing.T) {
 func TestWriteURLs_MatchExtComposesWithBlacklist(t *testing.T) {
 	// match-ext allows {sql, png}; blacklist excludes png. Only sql passes.
 	opts := defaultOpts()
-	opts.MatchExtensions = []string{"sql", "png"}
-	opts.Blacklist = mapset.NewThreadUnsafeSet[string]("png", "")
+	opts.MatchExtensions = []string{extSQL, extPNG}
+	opts.Blacklist = map[string]struct{}{extPNG: {}, "": {}}
 	buf, ch, done := pumpWrite(t, opts)
 	ch <- "https://example.com/dump.sql"
 	ch <- "https://example.com/img.png"
@@ -324,7 +331,7 @@ func TestWriteURLs_MatchRegexEmptyMeansNoFilter(t *testing.T) {
 	opts := defaultOpts()
 	opts.MatchRegex = nil
 	buf, ch, done := pumpWrite(t, opts)
-	ch <- "https://example.com/a"
+	ch <- testURLA
 	close(ch)
 	require.NoError(t, <-done)
 	require.Equal(t, "https://example.com/a\n", buf.String())
@@ -380,8 +387,8 @@ func TestWriteURLsJSON_OutputsValidJSONLines(t *testing.T) {
 		output.WriteURLsJSON(buf, ch, defaultOpts())
 		close(done)
 	}()
-	ch <- "https://example.com/a"
-	ch <- "https://example.com/b"
+	ch <- testURLA
+	ch <- testURLB
 	close(ch)
 	<-done
 
@@ -393,7 +400,7 @@ func TestWriteURLsJSON_OutputsValidJSONLines(t *testing.T) {
 
 func TestWriteURLsJSON_AppliesBlacklist(t *testing.T) {
 	opts := defaultOpts()
-	opts.Blacklist = mapset.NewThreadUnsafeSet[string]("png", "")
+	opts.Blacklist = map[string]struct{}{extPNG: {}, "": {}}
 	buf := &bytes.Buffer{}
 	ch := make(chan string, 4)
 	done := make(chan struct{})
@@ -430,7 +437,7 @@ func TestWriteURLsJSON_AppliesFPDedup(t *testing.T) {
 
 func TestWriteURLsJSON_AppliesMatchExtAndRegex(t *testing.T) {
 	opts := defaultOpts()
-	opts.MatchExtensions = []string{"sql"}
+	opts.MatchExtensions = []string{extSQL}
 	opts.MatchRegex = []*regexp.Regexp{regexp.MustCompile(`/dump`)}
 	buf := &bytes.Buffer{}
 	ch := make(chan string, 4)
