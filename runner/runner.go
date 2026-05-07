@@ -48,9 +48,18 @@ func (r *Runner) Init(ctx context.Context, c *providers.Config, providerNames []
 	return nil
 }
 
+// Result is one URL produced by the worker pool, tagged with the provider
+// that found it. The pool aggregates results from every (domain × provider)
+// pair into a single channel of Result values; the provider name is the
+// only piece of context downstream consumers can't otherwise recover.
+type Result struct {
+	URL      string
+	Provider string
+}
+
 // Start spawns r.threads worker goroutines. Each worker pulls Work items from
 // workChan until the channel is closed or ctx is cancelled.
-func (r *Runner) Start(ctx context.Context, workChan chan Work, results chan string) {
+func (r *Runner) Start(ctx context.Context, workChan chan Work, results chan Result) {
 	for i := uint(0); i < r.threads; i++ {
 		r.Add(1)
 		go func() {
@@ -71,15 +80,19 @@ func NewWork(domain string, provider providers.Provider) Work {
 	return Work{domain: domain, provider: provider}
 }
 
-// Do executes this Work item.
+// Do executes this Work item against an untagged URL channel. Library
+// consumers who don't want the worker pool's tagging layer can use this
+// directly. The runner's worker pool does not call Do — it tags inline.
 func (w *Work) Do(ctx context.Context, results chan string) error {
 	return w.provider.Fetch(ctx, w.domain, results)
 }
 
 // worker pulls Work items off workChan and executes them, surfacing per-work
 // errors as warnings rather than fatal: one provider failing for one domain
-// shouldn't kill the run.
-func (r *Runner) worker(ctx context.Context, workChan chan Work, results chan string) {
+// shouldn't kill the run. URLs flow through a per-work-item bridge channel
+// so the worker can tag each one with the producing provider's name before
+// fanning into the shared Result channel.
+func (r *Runner) worker(ctx context.Context, workChan chan Work, results chan Result) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -88,10 +101,40 @@ func (r *Runner) worker(ctx context.Context, workChan chan Work, results chan st
 			if !ok {
 				return
 			}
-			if err := work.Do(ctx, results); err != nil {
-				logrus.WithField("provider", work.provider.Name()).
-					Warnf("%s - %v", work.domain, err)
+			r.runWork(ctx, work, results)
+		}
+	}
+}
+
+// runWork executes a single Work item. The bridge channel buffer matches the
+// historical "shared chan" semantics — provider can stream up to N URLs
+// before back-pressure kicks in.
+func (r *Runner) runWork(ctx context.Context, work Work, results chan Result) {
+	bridge := make(chan string, 64)
+	forwarded := make(chan struct{})
+	providerName := work.provider.Name()
+
+	go func() {
+		defer close(forwarded)
+		for u := range bridge {
+			select {
+			case <-ctx.Done():
+				// Drain bridge so provider's send doesn't block forever
+				// on a closed-context ancestor.
+				for range bridge {
+				}
+				return
+			case results <- Result{URL: u, Provider: providerName}:
 			}
 		}
+	}()
+
+	err := work.provider.Fetch(ctx, work.domain, bridge)
+	close(bridge)
+	<-forwarded
+
+	if err != nil {
+		logrus.WithField("provider", providerName).
+			Warnf("%s - %v", work.domain, err)
 	}
 }

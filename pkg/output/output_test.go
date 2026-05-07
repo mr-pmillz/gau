@@ -2,21 +2,38 @@ package output_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/mr-pmillz/gau/v2/pkg/output"
+	"github.com/mr-pmillz/gau/v2/runner"
 	"github.com/stretchr/testify/require"
 )
 
 const (
-	testURLA = "https://example.com/a"
-	testURLB = "https://example.com/b"
-	extPNG   = "png"
-	extSQL   = "sql"
-	extBAK   = "bak"
+	testURLA     = "https://example.com/a"
+	testURLB     = "https://example.com/b"
+	extPNG       = "png"
+	extSQL       = "sql"
+	extBAK       = "bak"
+	testProvider = "test"
 )
+
+// tagURLs forwards raw URL strings from in onto a Result channel, tagging
+// each with provider="test". Lets test bodies stay terse (`ch <- "url"`)
+// while the writer signature has been tightened to chan runner.Result.
+func tagURLs(in <-chan string) <-chan runner.Result {
+	out := make(chan runner.Result, cap(in))
+	go func() {
+		defer close(out)
+		for u := range in {
+			out <- runner.Result{URL: u, Provider: testProvider}
+		}
+	}()
+	return out
+}
 
 // defaultOpts builds a WriteOptions that does no filtering — every test
 // then mutates only the fields it cares about.
@@ -34,7 +51,7 @@ func pumpWrite(t *testing.T, opts output.WriteOptions) (*bytes.Buffer, chan stri
 	ch := make(chan string, 16)
 	done := make(chan error, 1)
 	go func() {
-		done <- output.WriteURLs(buf, ch, opts)
+		done <- output.WriteURLs(buf, tagURLs(ch), opts)
 	}()
 	return buf, ch, done
 }
@@ -201,7 +218,7 @@ func TestWriteURLs_PropagatesWriteError(t *testing.T) {
 	ch := make(chan string, 4)
 	ch <- testURLA
 	close(ch)
-	err := output.WriteURLs(w, ch, defaultOpts())
+	err := output.WriteURLs(w, tagURLs(ch), defaultOpts())
 	require.Error(t, err)
 }
 
@@ -384,7 +401,7 @@ func TestWriteURLsJSON_OutputsValidJSONLines(t *testing.T) {
 	ch := make(chan string, 4)
 	done := make(chan struct{})
 	go func() {
-		output.WriteURLsJSON(buf, ch, defaultOpts())
+		output.WriteURLsJSON(buf, tagURLs(ch), defaultOpts())
 		close(done)
 	}()
 	ch <- testURLA
@@ -395,7 +412,34 @@ func TestWriteURLsJSON_OutputsValidJSONLines(t *testing.T) {
 	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
 	require.Len(t, lines, 2)
 	require.Contains(t, lines[0], `"url":"https://example.com/a"`)
+	require.Contains(t, lines[0], `"provider":"`+testProvider+`"`,
+		"every JSONL line must carry the source provider")
 	require.Contains(t, lines[1], `"url":"https://example.com/b"`)
+	require.Contains(t, lines[1], `"provider":"`+testProvider+`"`)
+}
+
+func TestWriteURLsJSON_ProviderFieldRoundTrips(t *testing.T) {
+	// Hand-rolled tagged channel: different URLs come from different
+	// providers, and each line must carry the *correct* attribution.
+	buf := &bytes.Buffer{}
+	in := make(chan runner.Result, 4)
+	in <- runner.Result{URL: testURLA, Provider: "wayback"}
+	in <- runner.Result{URL: testURLB, Provider: "commoncrawl"}
+	close(in)
+
+	output.WriteURLsJSON(buf, in, defaultOpts())
+
+	var decoded []map[string]string
+	for _, line := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
+		var m map[string]string
+		require.NoError(t, json.Unmarshal([]byte(line), &m))
+		decoded = append(decoded, m)
+	}
+	require.Len(t, decoded, 2)
+	require.Equal(t, "wayback", decoded[0]["provider"])
+	require.Equal(t, testURLA, decoded[0]["url"])
+	require.Equal(t, "commoncrawl", decoded[1]["provider"])
+	require.Equal(t, testURLB, decoded[1]["url"])
 }
 
 func TestWriteURLsJSON_AppliesBlacklist(t *testing.T) {
@@ -405,7 +449,7 @@ func TestWriteURLsJSON_AppliesBlacklist(t *testing.T) {
 	ch := make(chan string, 4)
 	done := make(chan struct{})
 	go func() {
-		output.WriteURLsJSON(buf, ch, opts)
+		output.WriteURLsJSON(buf, tagURLs(ch), opts)
 		close(done)
 	}()
 	ch <- "https://example.com/x.png"
@@ -424,7 +468,7 @@ func TestWriteURLsJSON_AppliesFPDedup(t *testing.T) {
 	ch := make(chan string, 4)
 	done := make(chan struct{})
 	go func() {
-		output.WriteURLsJSON(buf, ch, opts)
+		output.WriteURLsJSON(buf, tagURLs(ch), opts)
 		close(done)
 	}()
 	ch <- "https://example.com/a?x=1"
@@ -443,7 +487,7 @@ func TestWriteURLsJSON_AppliesMatchExtAndRegex(t *testing.T) {
 	ch := make(chan string, 4)
 	done := make(chan struct{})
 	go func() {
-		output.WriteURLsJSON(buf, ch, opts)
+		output.WriteURLsJSON(buf, tagURLs(ch), opts)
 		close(done)
 	}()
 	ch <- "https://example.com/dump/2024.sql"

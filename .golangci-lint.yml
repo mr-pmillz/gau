@@ -39,17 +39,8 @@ linters:
       - builtin$
       - examples$
     rules:
-      # Migration files share boilerplate (Migrate/Rollback closures + tx.Exec)
-      # by nature; the SQL each runs is unique. dupl false-positives across the
-      # migrations/ directory.
       - linters:
           - dupl
-        path: internal/infrastructure/database/migrations/
-      # Test files commonly repeat fixture strings ("Test Customer",
-      # "example.com", "invalid-uuid", JSON field names like "name",
-      # "external_id", etc.). Hoisting these into shared constants reduces
-      # readability of individual test cases without improving correctness.
-      - linters:
           - goconst
         path: _test\.go$
 formatters:

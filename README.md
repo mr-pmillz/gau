@@ -35,7 +35,7 @@ $ gau -h
 | `--ft`                     | list of mime-types to filter                                                                                        | gau --ft text/plain                       |
 | `--fp`                     | remove different parameters of the same endpoint                                                                    | gau --fp                                  |
 | `--fp-cap`                 | max --fp dedup entries (0 = unbounded; LRU eviction past the cap)                                                   | gau --fp --fp-cap 100000                  |
-| `--json`                   | output as json                                                                                                      | gau --json                                |
+| `--json`                   | emit one JSON object per line (JSONL) with `url` and `provider` fields                                              | gau --json                                |
 | `--match-ext`              | only emit URLs whose path ends in one of these extensions (allow-list; compound extensions like `tar.gz` supported) | gau --match-ext sql,bak,zip,tar.gz        |
 | `--match-regex`            | only emit URLs matching at least one Go regex pattern; use `(?i)` for case-insensitive                              | gau --match-regex '/admin,\.php$'         |
 | `--mc`                     | list of status codes to match                                                                                       | gau --mc 200,500                          |
@@ -263,7 +263,9 @@ func main() {
 		panic(err)
 	}
 
-	results := make(chan string, 1024)
+	// Each Result carries the URL plus the producing provider's name —
+	// the same data that drives the JSONL `provider` field in CLI mode.
+	results := make(chan runner.Result, 1024)
 	workCh := make(chan runner.Work)
 	r.Start(ctx, workCh, results)
 

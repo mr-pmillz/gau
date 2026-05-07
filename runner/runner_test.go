@@ -74,7 +74,7 @@ func TestRunner_StartSpawnsThreadsWorkers(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	work := make(chan runner.Work, 3)
-	results := make(chan string, 16)
+	results := make(chan runner.Result, 16)
 
 	r.Start(ctx, work, results)
 
@@ -86,11 +86,16 @@ func TestRunner_StartSpawnsThreadsWorkers(t *testing.T) {
 	r.Wait()
 	close(results)
 
-	var got []string
+	var got []runner.Result
 	for v := range results {
 		got = append(got, v)
 	}
 	require.Len(t, got, 3, "3 workers × 1 URL each should emit 3 results")
+	for _, r := range got {
+		require.Equal(t, testURLA, r.URL)
+		require.Equal(t, "fake", r.Provider,
+			"runner must tag every Result with the producing provider's name")
+	}
 }
 
 func TestRunner_ContextCancellationStopsWorkers(t *testing.T) {
@@ -106,7 +111,7 @@ func TestRunner_ContextCancellationStopsWorkers(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	work := make(chan runner.Work, 2)
-	results := make(chan string, 1)
+	results := make(chan runner.Result, 1)
 
 	r.Start(ctx, work, results)
 
@@ -143,7 +148,7 @@ func TestRunner_OneProviderErrorDoesNotKillRun(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	work := make(chan runner.Work, 2)
-	results := make(chan string, 4)
+	results := make(chan runner.Result, 4)
 
 	r.Start(ctx, work, results)
 	work <- runner.NewWork(testDomain, bad)
@@ -152,7 +157,7 @@ func TestRunner_OneProviderErrorDoesNotKillRun(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	var got []string
+	var got []runner.Result
 	go func() {
 		defer wg.Done()
 		for v := range results {
@@ -164,8 +169,43 @@ func TestRunner_OneProviderErrorDoesNotKillRun(t *testing.T) {
 	close(results)
 	wg.Wait()
 
-	require.Equal(t, []string{testURLA}, got,
-		"good provider must still produce results even after bad one errors")
+	require.Len(t, got, 1, "good provider must still produce results even after bad one errors")
+	require.Equal(t, testURLA, got[0].URL)
+	require.Equal(t, "good", got[0].Provider)
+}
+
+func TestRunner_ResultsTaggedPerProvider(t *testing.T) {
+	// Two providers in the same run. Each Result must carry the name of
+	// the specific provider that emitted its URL — no cross-contamination
+	// from the worker's bridge channel.
+	cfg := testutil.NewProviderConfig(t)
+	cfg.Threads = 2
+	r := &runner.Runner{}
+	require.NoError(t, r.Init(context.Background(), cfg, []string{}, providers.Filters{}))
+
+	pA := &fakeProvider{name: "alpha", urls: []string{"https://a.example.com/1", "https://a.example.com/2"}}
+	pB := &fakeProvider{name: "beta", urls: []string{"https://b.example.com/1"}}
+	r.Providers = []providers.Provider{pA, pB}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	work := make(chan runner.Work, 2)
+	results := make(chan runner.Result, 8)
+
+	r.Start(ctx, work, results)
+	work <- runner.NewWork(testDomain, pA)
+	work <- runner.NewWork(testDomain, pB)
+	close(work)
+	r.Wait()
+	close(results)
+
+	got := map[string]string{}
+	for v := range results {
+		got[v.URL] = v.Provider
+	}
+	require.Equal(t, "alpha", got["https://a.example.com/1"])
+	require.Equal(t, "alpha", got["https://a.example.com/2"])
+	require.Equal(t, "beta", got["https://b.example.com/1"])
 }
 
 type errProvider struct{ name string }

@@ -46,7 +46,7 @@ func runGau(cfg *flags.Config, domains []string) error {
 		log.Warn(err)
 	}
 
-	results := make(chan string)
+	results := make(chan runner.Result)
 
 	out := os.Stdout
 	if pcfg.Output != "" {

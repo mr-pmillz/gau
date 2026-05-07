@@ -13,12 +13,17 @@ import (
 	"strings"
 
 	jsoniter "github.com/json-iterator/go"
+	"github.com/mr-pmillz/gau/v2/runner"
 	"github.com/valyala/bytebufferpool"
 )
 
-// JSONResult is the shape of a single line in --json mode.
+// JSONResult is the shape of a single line in --json mode. The Provider
+// field carries the source archive that surfaced the URL ("wayback",
+// "commoncrawl", "otx", or "urlscan") so JSONL consumers can attribute
+// each URL without re-running gau per provider.
 type JSONResult struct {
-	URL string `json:"url"`
+	URL      string `json:"url"`
+	Provider string `json:"provider"`
 }
 
 // dedupCap of zero means unbounded. The runner translates the user-facing
@@ -55,15 +60,16 @@ type WriteOptions struct {
 }
 
 // WriteURLs streams URLs from results to writer, applying the full filter
-// pipeline. URLs that fail to parse are skipped silently.
-func WriteURLs(writer io.Writer, results <-chan string, opts WriteOptions) error {
+// pipeline. URLs that fail to parse are skipped silently. Plain-text output
+// emits the URL only — provider attribution is in the JSON variant.
+func WriteURLs(writer io.Writer, results <-chan runner.Result, opts WriteOptions) error {
 	dedup := newLRU(int(opts.DedupCap))
 	for result := range results {
-		u, err := url.Parse(result)
+		u, err := url.Parse(result.URL)
 		if err != nil {
 			continue
 		}
-		if !passesFilters(result, u, opts) {
+		if !passesFilters(result.URL, u, opts) {
 			continue
 		}
 		if opts.RemoveParameters {
@@ -75,7 +81,7 @@ func WriteURLs(writer io.Writer, results <-chan string, opts WriteOptions) error
 		}
 
 		buf := bytebufferpool.Get()
-		buf.B = append(buf.B, []byte(result)...)
+		buf.B = append(buf.B, []byte(result.URL)...)
 		buf.B = append(buf.B, '\n')
 		_, werr := writer.Write(buf.B)
 		bytebufferpool.Put(buf)
@@ -86,18 +92,19 @@ func WriteURLs(writer io.Writer, results <-chan string, opts WriteOptions) error
 	return nil
 }
 
-// WriteURLsJSON is the JSON variant of WriteURLs. Encoder errors on individual
-// records are skipped to match prior behavior — recovering on a per-record
-// basis is the right call for a streaming tool.
-func WriteURLsJSON(writer io.Writer, results <-chan string, opts WriteOptions) {
+// WriteURLsJSON is the JSON variant of WriteURLs. Each line is a JSONResult
+// with both the URL and the provider that surfaced it. Encoder errors on
+// individual records are skipped to match prior behavior — recovering on a
+// per-record basis is the right call for a streaming tool.
+func WriteURLsJSON(writer io.Writer, results <-chan runner.Result, opts WriteOptions) {
 	dedup := newLRU(int(opts.DedupCap))
 	enc := jsoniter.NewEncoder(writer)
 	for result := range results {
-		u, err := url.Parse(result)
+		u, err := url.Parse(result.URL)
 		if err != nil {
 			continue
 		}
-		if !passesFilters(result, u, opts) {
+		if !passesFilters(result.URL, u, opts) {
 			continue
 		}
 		if opts.RemoveParameters {
@@ -107,7 +114,7 @@ func WriteURLsJSON(writer io.Writer, results <-chan string, opts WriteOptions) {
 			}
 			dedup.add(key)
 		}
-		_ = enc.Encode(JSONResult{URL: result})
+		_ = enc.Encode(JSONResult{URL: result.URL, Provider: result.Provider})
 	}
 }
 
