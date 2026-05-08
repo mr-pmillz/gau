@@ -24,3 +24,6 @@ bin/
 # tooling can write into a guaranteed-existing path.
 coverage/*
 !coverage/.gitkeep
+
+# keep git in a clean state for goreleaser
+RELEASE_CHANGELOG.md
