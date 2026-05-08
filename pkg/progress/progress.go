@@ -283,10 +283,11 @@ func newDisplayWithMode(w io.Writer, t *Tracker, isTTY bool) *Display {
 		}),
 	}
 
-	// Start with an unknown max (stdin mode); we ChangeMax64 as work
-	// queues. Args mode calls WorkQueued before Start, so the first
-	// tick after that will have the real total.
-	bar := progressbar.NewOptions64(-1, opts...)
+	// Start with max=0 — we always ChangeMax64 on every tick from
+	// tracker.Snapshot(). Avoid max=-1 because that triggers schollz's
+	// internal spinner goroutine, which races with our update goroutine
+	// under -race (schollz v3.19.0; see progressbar.go:459).
+	bar := progressbar.NewOptions64(0, opts...)
 
 	d := &Display{
 		tracker: t,

@@ -19,4 +19,8 @@
 .idea
 dist
 bin/
-coverage/
+# Ignore coverage *output* (.out files, gotest logs) but keep the
+# directory itself tracked via coverage/.gitkeep so CI runs and local
+# tooling can write into a guaranteed-existing path.
+coverage/*
+!coverage/.gitkeep
