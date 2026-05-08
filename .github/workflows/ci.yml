@@ -71,43 +71,20 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       # Run Tests
-      #
-      # gotestfmt v2.5.0 panics with "Empty package name encountered" when
-      # its input contains lines that aren't valid `go test -json` events
-      # (compile errors, runtime panics, or `go test` self-output have an
-      # empty Package field). Two fixes applied:
-      #
-      #   1. Redirect stderr to a separate file rather than merging it
-      #      with `2>&1`, so only clean JSON flows into gotestfmt.
-      #   2. Run `./...` (full module) — `./test/...` does not exist in
-      #      this repo and `./pkg/...` alone skipped runner + runner/flags.
-      #
-      # `pipefail` ensures the step fails if go test fails even when
-      # gotestfmt exits 0 on the (truncated) JSON stream.
       - name: Tests
         run: |
           set -euo pipefail
-          mkdir -p coverage
-          go test -json -v -race ./... 2>coverage/gotest.err \
-            | tee coverage/gotest.log \
-            | gotestfmt
-          if [ -s coverage/gotest.err ]; then
-            echo "--- stderr from go test ---"
-            cat coverage/gotest.err
-          fi
+          go test -json -v ./... 2>&1 | tee coverage/gotest.log | gotestfmt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Upload the original go test logs (json + stderr) as artifacts
-      # for later review. Always runs so failures are debuggable.
-      - name: Upload test logs
+      # Upload the original go test log as an artifact for later review.
+      - name: Upload test log
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: test-logs
-          path: |
-            coverage/gotest.log
-            coverage/gotest.err
+          name: test-log
+          path: coverage/gotest.log
           if-no-files-found: error
   golangci:
     needs: build
