@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	jsoniter "github.com/json-iterator/go"
+	"github.com/mr-pmillz/gau/v2/pkg/progress"
 	"github.com/mr-pmillz/gau/v2/runner"
 	"github.com/valyala/bytebufferpool"
 )
@@ -57,6 +58,12 @@ type WriteOptions struct {
 
 	// DedupCap caps the dedup set; 0 means unbounded.
 	DedupCap uint
+
+	// Tracker, if non-nil, receives one URLEmitted call per URL after
+	// it survives every filter and immediately before the writer
+	// emits it. The CLI wires this from --progress; library consumers
+	// can pass their own Tracker to drive a summary externally.
+	Tracker *progress.Tracker
 }
 
 // WriteURLs streams URLs from results to writer, applying the full filter
@@ -78,6 +85,10 @@ func WriteURLs(writer io.Writer, results <-chan runner.Result, opts WriteOptions
 				continue
 			}
 			dedup.add(key)
+		}
+
+		if opts.Tracker != nil {
+			opts.Tracker.URLEmitted(result.Provider, urlExt(u))
 		}
 
 		buf := bytebufferpool.Get()
@@ -114,8 +125,18 @@ func WriteURLsJSON(writer io.Writer, results <-chan runner.Result, opts WriteOpt
 			}
 			dedup.add(key)
 		}
+		if opts.Tracker != nil {
+			opts.Tracker.URLEmitted(result.Provider, urlExt(u))
+		}
 		_ = enc.Encode(JSONResult{URL: result.URL, Provider: result.Provider})
 	}
+}
+
+// urlExt extracts a normalized extension from a URL path: lowercase, no
+// leading dot, "" when the path has no extension. Reused by Tracker to
+// bucket emitted URLs in the summary.
+func urlExt(u *url.URL) string {
+	return strings.TrimPrefix(strings.ToLower(path.Ext(u.Path)), ".")
 }
 
 // passesFilters returns true when the URL should be emitted under opts.
@@ -171,7 +192,7 @@ func isBlacklisted(u *url.URL, blacklist map[string]struct{}) bool {
 	if blacklist == nil {
 		return false
 	}
-	ext := strings.TrimPrefix(strings.ToLower(path.Ext(u.Path)), ".")
+	ext := urlExt(u)
 	if ext == "" {
 		return false
 	}

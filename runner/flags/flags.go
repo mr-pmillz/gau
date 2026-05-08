@@ -75,6 +75,7 @@ type Config struct {
 	FPCap             uint              `mapstructure:"fpcap"`
 	RateLimit         RateLimitConfig   `mapstructure:"ratelimit"`
 	UserAgents        []string          `mapstructure:"useragents"`
+	Progress          bool              `mapstructure:"progress"`
 	Outfile           string            // populated from --output / -o flag
 }
 
@@ -248,6 +249,7 @@ func registerFlags(cmd *cobra.Command) {
 	f.BoolP("verbose", "v", false, "show verbose output")
 	f.Bool("json", false, "output as json")
 	f.StringSlice("user-agents", nil, "override the built-in User-Agent pool (comma-separated; one will be picked at random per request)")
+	f.Bool("progress", false, "show live progress on stderr (auto-adapts to TTY vs CI logs) plus an end-of-run summary")
 
 	f.Bool("secure", false, "verify TLS certificates (default false: insecure for back-compat)")
 
@@ -378,6 +380,9 @@ func applyFlagOverrides(cmd *cobra.Command, cfg *Config) {
 	}
 	if isSet(cmd, "user-agents") {
 		cfg.UserAgents = mustStringSlice(cmd, "user-agents")
+	}
+	if isSet(cmd, "progress") {
+		cfg.Progress = mustBool(cmd, "progress")
 	}
 }
 

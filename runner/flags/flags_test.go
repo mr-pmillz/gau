@@ -212,6 +212,19 @@ func TestFlagOverride_UserAgentsDefaultsToNil(t *testing.T) {
 		"unset --user-agents must leave UserAgents nil so httpclient falls back to its built-in pool")
 }
 
+func TestFlagOverride_ProgressDefaultOff(t *testing.T) {
+	cfg, _, err := runWithArgs(t)
+	require.NoError(t, err)
+	require.False(t, cfg.Progress,
+		"--progress must default to off so library/CLI runs stay silent on stderr")
+}
+
+func TestFlagOverride_ProgressOn(t *testing.T) {
+	cfg, _, err := runWithArgs(t, "--progress")
+	require.NoError(t, err)
+	require.True(t, cfg.Progress)
+}
+
 func TestFlagOverride_RateLimit(t *testing.T) {
 	cfg, _, err := runWithArgs(t, "--rate-limit-commoncrawl", "0.1")
 	require.NoError(t, err)

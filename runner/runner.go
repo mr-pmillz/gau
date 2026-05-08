@@ -21,6 +21,12 @@ type Runner struct {
 
 	Providers []providers.Provider
 	threads   uint
+
+	// OnWorkComplete is invoked once per Work item after the provider's
+	// Fetch returns and all of its bridged URLs have been forwarded to
+	// the Result channel. err is the provider's return value (nil on
+	// success). Set BEFORE calling Start; nil = no-op.
+	OnWorkComplete func(domain, provider string, err error)
 }
 
 // Init initializes the runner. ctx governs any provider that needs to do work
@@ -136,5 +142,8 @@ func (r *Runner) runWork(ctx context.Context, work Work, results chan Result) {
 	if err != nil {
 		logrus.WithField("provider", providerName).
 			Warnf("%s - %v", work.domain, err)
+	}
+	if r.OnWorkComplete != nil {
+		r.OnWorkComplete(work.domain, providerName, err)
 	}
 }

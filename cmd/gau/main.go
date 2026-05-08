@@ -10,6 +10,7 @@ import (
 
 	"github.com/mr-pmillz/gau/v2/pkg/httpclient"
 	"github.com/mr-pmillz/gau/v2/pkg/output"
+	"github.com/mr-pmillz/gau/v2/pkg/progress"
 	"github.com/mr-pmillz/gau/v2/runner"
 	"github.com/mr-pmillz/gau/v2/runner/flags"
 	log "github.com/sirupsen/logrus"
@@ -58,12 +59,28 @@ func runGau(cfg *flags.Config, domains []string) error {
 		out = f
 	}
 
+	// --progress wires three things: a Tracker that the writer + runner
+	// feed events into, a Display that renders the live UI on stderr
+	// (TTY → animated bar; non-TTY → periodic line logger), and a final
+	// summary printed to stderr after the pipeline drains. All three are
+	// no-ops when the flag is off — preserves today's silent default.
+	var tracker *progress.Tracker
+	var display *progress.Display
+	if cfg.Progress {
+		tracker = progress.NewTracker()
+		display = progress.NewDisplay(os.Stderr, tracker)
+		gau.OnWorkComplete = func(_, providerName string, fetchErr error) {
+			tracker.WorkCompleted(providerName, fetchErr)
+		}
+	}
+
 	writeOpts := output.WriteOptions{
 		Blacklist:        pcfg.Blacklist,
 		MatchExtensions:  pcfg.MatchExtensions,
 		MatchRegex:       pcfg.MatchRegex,
 		RemoveParameters: pcfg.RemoveParameters,
 		DedupCap:         pcfg.FPCap,
+		Tracker:          tracker, // nil when --progress is off
 	}
 
 	writeErr := make(chan error, 1)
@@ -83,6 +100,9 @@ func runGau(cfg *flags.Config, domains []string) error {
 	gau.Start(ctx, workChan, results)
 
 	if len(domains) > 0 {
+		if tracker != nil {
+			tracker.WorkQueued(len(domains) * len(gau.Providers))
+		}
 		for _, provider := range gau.Providers {
 			for _, domain := range domains {
 				workChan <- runner.NewWork(domain, provider)
@@ -92,6 +112,9 @@ func runGau(cfg *flags.Config, domains []string) error {
 		sc := bufio.NewScanner(os.Stdin)
 		for sc.Scan() {
 			domain := sc.Text()
+			if tracker != nil {
+				tracker.WorkQueued(len(gau.Providers))
+			}
 			for _, provider := range gau.Providers {
 				workChan <- runner.NewWork(domain, provider)
 			}
@@ -101,6 +124,9 @@ func runGau(cfg *flags.Config, domains []string) error {
 			gau.Wait()
 			close(results)
 			writeWg.Wait()
+			if display != nil {
+				display.Close()
+			}
 			return fmt.Errorf("read stdin: %w", scErr)
 		}
 	}
@@ -109,6 +135,15 @@ func runGau(cfg *flags.Config, domains []string) error {
 	gau.Wait()
 	close(results)
 	writeWg.Wait()
+
+	// Stop the live display before printing the summary so the bar
+	// doesn't redraw on top of the summary block.
+	if display != nil {
+		display.Close()
+	}
+	if tracker != nil {
+		tracker.WriteSummary(os.Stderr)
+	}
 
 	if err := <-writeErr; err != nil {
 		return fmt.Errorf("write results: %w", err)

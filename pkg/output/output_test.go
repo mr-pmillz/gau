@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/mr-pmillz/gau/v2/pkg/output"
+	"github.com/mr-pmillz/gau/v2/pkg/progress"
 	"github.com/mr-pmillz/gau/v2/runner"
 	"github.com/stretchr/testify/require"
 )
@@ -498,4 +499,60 @@ func TestWriteURLsJSON_AppliesMatchExtAndRegex(t *testing.T) {
 	require.Contains(t, buf.String(), "/dump/2024.sql")
 	require.NotContains(t, buf.String(), "static")
 	require.NotContains(t, buf.String(), "dump/2024.png")
+}
+
+// --- Tracker integration ---
+
+func TestWriteURLs_TrackerRecordsPostFilterCounts(t *testing.T) {
+	opts := defaultOpts()
+	opts.Blacklist = map[string]struct{}{"png": {}, "": {}}
+	opts.Tracker = progress.NewTracker()
+
+	buf := &bytes.Buffer{}
+	in := make(chan runner.Result, 8)
+	in <- runner.Result{URL: "https://example.com/a.html", Provider: "wayback"}
+	in <- runner.Result{URL: "https://example.com/b.html", Provider: "wayback"}
+	in <- runner.Result{URL: "https://example.com/c.png", Provider: "wayback"} // blacklisted
+	in <- runner.Result{URL: "https://example.com/d.pdf", Provider: "otx"}
+	in <- runner.Result{URL: "https://example.com/no-ext", Provider: "otx"}
+	close(in)
+	require.NoError(t, output.WriteURLs(buf, in, opts))
+
+	s := opts.Tracker.Snapshot()
+	require.EqualValues(t, 4, s.URLs, "blacklisted URL must NOT increment the tracker")
+	require.Equal(t, int64(2), s.ByProvider["wayback"])
+	require.Equal(t, int64(2), s.ByProvider["otx"])
+	require.Equal(t, int64(2), s.ByExtension["html"])
+	require.Equal(t, int64(1), s.ByExtension["pdf"])
+	require.Equal(t, int64(1), s.ByExtension["(no ext)"])
+	require.Equal(t, int64(0), s.ByExtension["png"], "blacklisted png must not appear in extension counts")
+}
+
+func TestWriteURLsJSON_TrackerRecordsPostFilterCounts(t *testing.T) {
+	opts := defaultOpts()
+	opts.MatchExtensions = []string{"sql"}
+	opts.Tracker = progress.NewTracker()
+
+	buf := &bytes.Buffer{}
+	in := make(chan runner.Result, 4)
+	in <- runner.Result{URL: "https://example.com/dump.sql", Provider: "commoncrawl"}
+	in <- runner.Result{URL: "https://example.com/page.html", Provider: "commoncrawl"} // wrong ext
+	close(in)
+	output.WriteURLsJSON(buf, in, opts)
+
+	s := opts.Tracker.Snapshot()
+	require.EqualValues(t, 1, s.URLs)
+	require.Equal(t, int64(1), s.ByProvider["commoncrawl"])
+	require.Equal(t, int64(1), s.ByExtension["sql"])
+}
+
+func TestWriteURLs_TrackerNilIsNoOp(t *testing.T) {
+	// Sanity check: leaving Tracker nil must not panic.
+	opts := defaultOpts() // Tracker unset
+	require.Nil(t, opts.Tracker)
+	buf, ch, done := pumpWrite(t, opts)
+	ch <- testURLA
+	close(ch)
+	require.NoError(t, <-done)
+	require.Contains(t, buf.String(), testURLA)
 }

@@ -41,6 +41,7 @@ $ gau -h
 | `--mc`                     | list of status codes to match                                                                                       | gau --mc 200,500                          |
 | `--mt`                     | list of mime-types to match                                                                                         | gau --mt text/html,application/json       |
 | `--output`, `-o`           | filename to write results to                                                                                        | gau --output out.txt                      |
+| `--progress`               | live progress on stderr (TTY bar / CI-friendly lines) + end-of-run summary by provider and extension                | gau --progress example.com                |
 | `--providers`              | list of providers to use (wayback,commoncrawl,otx,urlscan)                                                          | gau --providers wayback                   |
 | `--proxy`                  | http proxy to use (socks5:// or http://                                                                             | gau --proxy http://proxy.example.com:8080 |
 | `--rate-limit-wayback`     | wayback requests per second (0 = unlimited)                                                                         | gau --rate-limit-wayback 0.5              |
@@ -95,6 +96,49 @@ defaults (`commoncrawl=0.2/s` — one request every 5 seconds, `wayback=1/s`,
 still being usable. Common Crawl in particular is highly sensitive to
 bursty traffic; raising this default is not recommended. Set any limit
 to `0` to disable for that provider.
+
+### Progress and summary
+
+`--progress` enables a live progress display on **stderr** plus an
+end-of-run summary breakdown — useful for long runs where the URL stream
+on stdout gives you no feedback. The display uses
+[`schollz/progressbar/v3`](https://github.com/schollz/progressbar) and
+auto-adapts to the environment:
+
+- **TTY (interactive shell)** — animated bar redraws in place, throttled
+  to 200ms.
+- **Non-TTY (pipes, CI runners, `2>file`)** — ANSI codes disabled, one
+  status line every 5 seconds. No `\r` garbage in CI logs.
+
+Progress and summary always go to stderr, so piping stdout (`gau --json
+--progress example.com | jq`) stays clean.
+
+Sample summary block:
+
+```
+=== Summary (elapsed 1m23s) ===
+
+Per provider:
+  commoncrawl    3,456
+  otx            1,200
+  urlscan          523
+  wayback       12,345
+  ──────────────────────────
+  total         17,524
+
+Top extensions:
+  html           8,432
+  php            2,123
+  pdf            1,567
+  jpg            1,234
+  (no ext)         800
+  ... 12 more
+```
+
+Counts reflect URLs that survived every active filter (`--match-ext`,
+`--match-regex`, `--blacklist`, `--fp`) — i.e. what's actually in the
+output stream. URLs with no path extension bucket as `(no ext)`. Top
+extensions caps at 10; the rest are summarized as `... N more`.
 
 ### User-Agents
 

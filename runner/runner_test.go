@@ -174,6 +174,62 @@ func TestRunner_OneProviderErrorDoesNotKillRun(t *testing.T) {
 	require.Equal(t, "good", got[0].Provider)
 }
 
+func TestRunner_OnWorkCompleteFiresPerWorkItem(t *testing.T) {
+	cfg := testutil.NewProviderConfig(t)
+	cfg.Threads = 2
+	r := &runner.Runner{}
+	require.NoError(t, r.Init(context.Background(), cfg, []string{}, providers.Filters{}))
+
+	good := &fakeProvider{name: "good", urls: []string{testURLA}}
+	bad := &errProvider{name: "bad"}
+	r.Providers = []providers.Provider{good, bad}
+
+	type event struct {
+		domain   string
+		provider string
+		hadErr   bool
+	}
+	var mu sync.Mutex
+	var events []event
+	r.OnWorkComplete = func(domain, provider string, err error) {
+		mu.Lock()
+		events = append(events, event{domain, provider, err != nil})
+		mu.Unlock()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	work := make(chan runner.Work, 2)
+	results := make(chan runner.Result, 4)
+
+	r.Start(ctx, work, results)
+	work <- runner.NewWork(testDomain, good)
+	work <- runner.NewWork(testDomain, bad)
+	close(work)
+
+	go func() {
+		for range results { // drain
+		}
+	}()
+	r.Wait()
+	close(results)
+
+	require.Len(t, events, 2, "callback must fire once per Work item")
+	// Callback must reflect the actual error state.
+	var sawGoodOK, sawBadErr bool
+	for _, e := range events {
+		require.Equal(t, testDomain, e.domain)
+		switch e.provider {
+		case "good":
+			sawGoodOK = !e.hadErr
+		case "bad":
+			sawBadErr = e.hadErr
+		}
+	}
+	require.True(t, sawGoodOK, "successful Work must callback with err=nil")
+	require.True(t, sawBadErr, "errored Work must callback with err!=nil")
+}
+
 func TestRunner_ResultsTaggedPerProvider(t *testing.T) {
 	// Two providers in the same run. Each Result must carry the name of
 	// the specific provider that emitted its URL — no cross-contamination
